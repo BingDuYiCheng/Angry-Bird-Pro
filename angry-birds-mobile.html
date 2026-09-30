@@ -1,0 +1,3165 @@
+<!DOCTYPE html>
+<!--
+  ============================================================
+  《愤怒的小鸟》 积木（方块/建筑结构）物理与逻辑优化版
+  ============================================================
+  修复 Bug 清单：
+  1. 碰撞检测升级为 分离轴定理（SAT）：
+     - 旋转矩形 vs 旋转矩形（SAT，8 条分离轴）
+     - 旋转矩形 vs 圆形（矩形边法线 + 圆心-顶点方向轴）
+     - 圆 vs 圆、轴对齐矩形（作为 SAT 特例）
+     碰撞法线统一为"从 a 指向 b"，穿透深度取最小重叠轴，用于脉冲响应。
+  2. 支撑检测（hasSupport）重构：基于接触点法线判断——
+     对沉睡块用 SAT 检查其下方接触面，法线向上分量 > 0.7 且深度足够才算支撑；
+     屋顶斜木等旋转块通过 SAT 端点接触正确判支撑；每帧重算，失去支撑立即唤醒。
+  3. 块生成逻辑修正：addTower 按实际尺寸精确计算柱/横木位置（紧密接触无间隙/重叠），
+     生成后立即对每块做 hasSupport 校验并正确设置 awake/static；
+     屋顶斜木端点精确落在横木端部。
+  4. 移除 groundCollide 中"强制旋转归正"（target = round(rot/π)*π 及 vrot += diff*3），
+     仅保留速度阻尼与摩擦，旋转自然衰减。
+  5. 连锁倒塌增强：smash 唤醒上方物体 + 每帧支撑检测自动递归唤醒失去支撑的上层块，
+     形成完整连锁倒塌。
+  6. 屋顶装饰件（deco）不再豁免支撑检测，与普通块平等参与；
+     但赋予更高的旋转阻尼（0.90），使其不易被轻易"飞走"。
+  7. 材质参数调优：破碎阈值 木头 500 / 石头 1200；
+     猪伤害 damage = min(5, max(1, floor(impact/200)))；
+     恢复系数 木头 0.3 / 石头 0.15 / 猪·鸟 0.45。
+  8. 旋转物理稳定性：角速度上限降至 20 rad/s；角速度阻尼 0.96（deco 0.90）。
+  ============================================================
+  【v3 新增功能】
+  A. 难度选择：菜单提供 简单🟢 / 普通🟡 / 困难🔴 三档，默认普通。
+     影响：猪血量系数（0.8/1.0/1.4）、方块破碎阈值（木 400/500/650，石 900/1200/1600）、
+     鸟数量（简单 +1 红鸟，困难 -1 非黑鸟）、黑鸟爆炸半径（困难 180，其余 150）。
+  B. 左右空气墙：在 x=-10 与 x=W+10 各生成一堵不可见静态墙（isWall），
+     所有物体碰撞后反弹，不再直接飞出屏幕；越界保险条件放宽至 ±500。
+  C. 修复木板落地误伤：猪伤害判定增加 impact>300、碰撞方垂直下落速度>80、
+     0.2 秒伤害冷却（lastDamageTime），消除微振动误伤猪/鸟。
+  D. 多端优化：
+     - 响应式布局：窄屏（<700px）UI 换行、字号/按钮自适应，竖屏显示"请横屏"提示（可关闭）；
+     - 触控：弹弓拖拽区域扩大至 120px，触摸点击技能响应区加大；
+     - 性能：移动端子步 4→3，粒子总数上限 150（超出移除最早），屏幕外物体跳过绘制；
+     - 可用性：新增全屏按钮，剩余小鸟在窄屏显示为数字计数；
+     - 健壮性：loadLevel 清空粒子/飘字，保留 __ab 调试探针。
+  ============================================================
+  【v4 完美手机浏览器适配】
+  a. 画布 contain 自适应：容器 100vw/100vh + flex 居中；resize() 按 16:9 计算
+     displayW/displayH（窗口更宽以高为基准，更高以宽为基准），保证完整可见无裁剪；
+     UI 全部按 scale = displayW/1280 动态缩放，交互元素最小 44×44px 点击区（Apple HIG）。
+  b. 触摸拖拽手感：onDown 热区 80→150px；拉弓时轨迹虚线加粗（移动端 7px）；
+     拉弓/发射提供 navigator.vibrate 微震动反馈（Android，iOS 自动忽略）。
+  c. 性能：移动端物理子步 4→2；粒子总数上限 120；爆炸粒子 46→28；
+     震屏强度移动端减半（shakeT 0.3→0.15）。
+  d. 横屏引导：竖屏（innerHeight>innerWidth 且移动端）自动显示"请横屏"旋转提示遮罩，
+     方向变化（orientationchange/resize）实时切换；右上角全屏按钮兼容
+     requestFullscreen / webkitRequestFullscreen（iOS Safari）；启动隐藏地址栏（scrollTo 技巧）。
+  ============================================================
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<!-- v7：禁止手动缩放 / 双击缩放；interactive-widget 让软键盘不顶乱布局（安卓 Chrome 108+）；viewport-fit=cover 适配刘海屏 -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="format-detection" content="telephone=no,email=no,address=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<title>愤怒的小鸟 - 手机版</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    position: fixed;           /* iOS Safari 防橡皮筋滚动 */
+    width: 100%;
+    background: #000;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;   /* 禁长按呼出菜单/保存图片 */
+    -webkit-tap-highlight-color: transparent;
+    /* v7：禁页面滚动与橡皮筋，禁双指/双击缩放 */
+    touch-action: none;
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: auto;
+    -webkit-text-size-adjust: 100%;
+  }
+  /* v7：横竖屏切换时禁用过渡抖动，避免 iOS 旋转动画期间重排闪烁 */
+  html { touch-action: none; }
+  body {
+    font-family: "Arial", "Microsoft YaHei", sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* —— v4：容器全屏，画布 contain 居中 —— */
+  #game-container {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    touch-action: none;        /* v7：容器内一律不滚动/不缩放 */
+  }
+  #game {
+    display: block;
+    background: #87ceeb;
+    touch-action: none;        /* 禁止触摸滚动/缩放 */
+    cursor: grab;              /* v7：可拖动平移视角 */
+    max-width: 100%;
+    max-height: 100%;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-user-drag: none;
+    user-drag: none;
+  }
+  #game.panning { cursor: grabbing; }
+  #ui {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 46px;
+    background: rgba(0,0,0,0.35);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    font-size: 17px;
+    font-weight: bold;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.6);
+    z-index: 5;
+    user-select: none;
+  }
+  #ui .score { color: #ffd700; font-size: 21px; }
+  #birds-left { font-size: 16px; letter-spacing: 2px; }
+  #overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.62);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    z-index: 10;
+    text-align: center;
+  }
+  #overlay.show { display: flex; }
+  #overlay h1 {
+    color: #fff; font-size: 52px; margin-bottom: 14px;
+    text-shadow: 2px 2px 6px rgba(0,0,0,0.9);
+  }
+  #overlay h2 {
+    color: #ffd700; font-size: 26px; margin-bottom: 28px;
+    text-shadow: 1px 1px 4px rgba(0,0,0,0.8);
+  }
+  #overlay button {
+    font-size: 22px; padding: 14px 46px;
+    border: none; border-radius: 30px;
+    background: linear-gradient(#ff8c00, #ff4500);
+    color: #fff; cursor: pointer;
+    box-shadow: 0 4px 0 #cc3300;
+    font-weight: bold;
+  }
+  #overlay button:active { transform: translateY(3px); box-shadow: 0 1px 0 #cc3300; }
+  #overlay .btn-row { display: flex; gap: 18px; }
+  #overlay #skip-btn {
+    font-size: 20px; padding: 12px 30px;
+    border: none; border-radius: 30px;
+    background: linear-gradient(#78909c, #546e7a);
+    color: #fff; cursor: pointer;
+    box-shadow: 0 4px 0 #37474f;
+    font-weight: bold;
+    display: none;
+  }
+  #overlay #skip-btn:active { transform: translateY(3px); box-shadow: 0 1px 0 #37474f; }
+  /* —— v3：难度选择 —— */
+  #difficulty-box { margin-bottom: 22px; display: none; }
+  #difficulty-box.show { display: block; }
+  #difficulty-box .diff-title {
+    color: #fff; font-size: 18px; margin-bottom: 10px;
+    text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
+  }
+  #difficulty-box .diff-btns { display: flex; gap: 12px; justify-content: center; }
+  #difficulty-box .diff-btn {
+    font-size: 18px; padding: 10px 26px;
+    border: 3px solid rgba(255,255,255,0.35);
+    border-radius: 24px;
+    background: rgba(255,255,255,0.12);
+    color: #fff; cursor: pointer; font-weight: bold;
+    transition: transform 0.1s, background 0.15s, border-color 0.15s;
+  }
+  #difficulty-box .diff-btn:active { transform: scale(0.95); }
+  #difficulty-box .diff-btn.selected {
+    border-color: #ffd700;
+    background: rgba(255,215,0,0.28);
+    box-shadow: 0 0 12px rgba(255,215,0,0.5);
+  }
+  /* —— v3：全屏按钮 —— */
+  #fullscreen-btn {
+    position: absolute; top: 52px; right: 10px;
+    width: 34px; height: 34px;
+    border: none; border-radius: 8px;
+    background: rgba(0,0,0,0.35);
+    color: #fff; font-size: 16px; cursor: pointer;
+    z-index: 6; line-height: 1;
+  }
+  /* —— v4：横屏提示遮罩（竖屏时显示，带旋转动画）—— */
+  #rotate-hint {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(8,16,26,0.94);
+    display: none; flex-direction: column;
+    align-items: center; justify-content: center;
+    z-index: 30; color: #fff; text-align: center;
+  }
+  #rotate-hint.show { display: flex; }
+  #rotate-hint .icon {
+    font-size: 60px; margin-bottom: 16px;
+    animation: rotate-tip 1.6s ease-in-out infinite;
+  }
+  @keyframes rotate-tip {
+    0%   { transform: rotate(0deg); }
+    40%  { transform: rotate(90deg); }
+    100% { transform: rotate(90deg); }
+  }
+  #rotate-hint .txt { font-size: 20px; margin-bottom: 24px; line-height: 1.5; }
+  #rotate-hint button {
+    font-size: 16px; padding: 12px 32px;
+    min-width: 44px; min-height: 44px;
+    border: none; border-radius: 22px;
+    background: linear-gradient(#78909c, #546e7a);
+    color: #fff; cursor: pointer; font-weight: bold;
+  }
+  /* —— v4：所有交互元素最小 44×44px 点击区（Apple HIG）—— */
+  #overlay button, #difficulty-box .diff-btn, #fullscreen-btn, #rotate-hint button {
+    min-width: 44px; min-height: 44px;
+  }
+  /* —— v5【改动2】：使用说明按钮 + 面板 —— */
+  #help-btn {
+    position: absolute; top: 96px; right: 10px;
+    width: 34px; height: 34px;
+    border: none; border-radius: 8px;
+    background: rgba(0,0,0,0.35);
+    color: #fff; font-size: 18px; font-weight: bold; cursor: pointer;
+    z-index: 6; line-height: 1;
+    min-width: 44px; min-height: 44px;
+  }
+  #help-panel {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(8,16,26,0.92);
+    display: none; align-items: center; justify-content: center;
+    z-index: 40; padding: 16px;
+  }
+  #help-panel.show { display: flex; }
+  #help-panel .help-card {
+    background: rgba(24,38,52,0.98);
+    border: 2px solid rgba(255,255,255,0.18);
+    border-radius: 14px;
+    padding: 18px 20px 16px;
+    max-width: 560px; width: 100%;
+    max-height: 88vh; overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    color: #eaf2f8; text-align: left;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+  }
+  #help-panel h3 {
+    font-size: 20px; margin-bottom: 12px; color: #ffd700; text-align: center;
+  }
+  #help-panel ul { list-style: none; }
+  #help-panel li {
+    font-size: 14px; line-height: 1.75; margin-bottom: 8px;
+    padding-left: 20px; position: relative;
+  }
+  #help-panel li:before { content: '•'; position: absolute; left: 6px; color: #ffcc66; }
+  #help-panel .k { color: #ffd700; font-weight: bold; }
+  #help-panel .ultra { color: #ff8a65; font-weight: bold; }
+  #help-panel .help-close {
+    display: block; margin: 14px auto 0;
+    font-size: 16px; padding: 11px 34px;
+    min-width: 44px; min-height: 44px;
+    border: none; border-radius: 22px;
+    background: linear-gradient(#ff8c00, #ff4500);
+    color: #fff; cursor: pointer; font-weight: bold;
+  }
+  /* —— v6【功能1】：关卡总览按钮 + 选择面板 —— */
+  #level-btn {
+    position: absolute; top: 144px; right: 10px;
+    width: 34px; height: 34px;
+    border: none; border-radius: 8px;
+    background: rgba(0,0,0,0.35);
+    color: #fff; font-size: 16px; cursor: pointer;
+    z-index: 6; line-height: 1;
+    min-width: 44px; min-height: 44px;
+  }
+  #level-panel {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(8,16,26,0.92);
+    display: none; align-items: center; justify-content: center;
+    z-index: 40; padding: 16px;
+  }
+  #level-panel.show { display: flex; }
+  #level-panel .level-card {
+    background: rgba(24,38,52,0.98);
+    border: 2px solid rgba(255,255,255,0.18);
+    border-radius: 14px;
+    padding: 16px 16px 14px;
+    max-width: 620px; width: 100%;
+    max-height: 88vh; overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    color: #eaf2f8;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+  }
+  #level-panel h3 {
+    font-size: 20px; margin-bottom: 12px; color: #ffd700; text-align: center;
+  }
+  #level-grid {
+    display: grid;
+    grid-template-columns: repeat(10, minmax(44px, 1fr));
+    gap: 6px;
+  }
+  #level-grid .level-cell {
+    min-width: var(--cell-min, 44px); min-height: var(--cell-min, 44px);
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.10);
+    color: #eaf2f8; font-size: 13px; font-weight: bold;
+    cursor: pointer; padding: 0;
+  }
+  #level-grid .level-cell.current {
+    border-color: #ffd700;
+    background: rgba(255,215,0,0.32);
+    color: #fff;
+    box-shadow: 0 0 10px rgba(255,215,0,0.5);
+  }
+  #level-grid .level-cell.ultra { color: #ff8a65; }
+  #level-panel .level-close {
+    display: block; margin: 14px auto 0;
+    font-size: 16px; padding: 11px 34px;
+    min-width: 44px; min-height: 44px;
+    border: none; border-radius: 22px;
+    background: linear-gradient(#78909c, #546e7a);
+    color: #fff; cursor: pointer; font-weight: bold;
+  }
+  /* —— v3：窄屏适配 —— */
+  @media (max-width: 700px) {
+    #ui { flex-wrap: wrap; height: auto; padding: 4px 10px; font-size: 13px; }
+    #ui .score { font-size: 16px; }
+    #birds-left { font-size: 13px; }
+    #overlay h1 { font-size: 34px; }
+    #overlay h2 { font-size: 18px; margin-bottom: 18px; }
+    #overlay button { font-size: 17px; padding: 11px 30px; }
+    #overlay #skip-btn { font-size: 15px; padding: 9px 20px; }
+    #difficulty-box .diff-btn { font-size: 15px; padding: 8px 18px; }
+    #hint { font-size: 11px; bottom: 8px; }
+    #fullscreen-btn { top: 44px; width: 30px; height: 30px; }
+  }
+  #hint {
+    position: absolute; bottom: 12px; left: 0; right: 0;
+    text-align: center; color: rgba(255,255,255,0.95);
+    font-size: 14px; text-shadow: 1px 1px 2px rgba(0,0,0,0.7);
+    z-index: 5; pointer-events: none;
+  }
+
+  /* ═══════════ v7：移动端横屏适配（统一由 --ui-scale 驱动尺寸）═══════════ */
+  :root { --ui-scale: 1; }
+  #ui { height: calc(46px * var(--ui-scale)); font-size: calc(17px * var(--ui-scale)); padding: 0 calc(16px * var(--ui-scale)); }
+  #ui .score { font-size: calc(21px * var(--ui-scale)); }
+  #birds-left { font-size: calc(16px * var(--ui-scale)); }
+  #hint { font-size: calc(14px * var(--ui-scale)); bottom: calc(12px * var(--ui-scale)); }
+  #overlay h1 { font-size: calc(52px * var(--ui-scale)); margin-bottom: calc(14px * var(--ui-scale)); }
+  #overlay h2 { font-size: calc(26px * var(--ui-scale)); margin-bottom: calc(28px * var(--ui-scale)); }
+  #overlay button { font-size: calc(22px * var(--ui-scale)); padding: calc(14px * var(--ui-scale)) calc(46px * var(--ui-scale)); }
+  #overlay .btn-row { gap: calc(18px * var(--ui-scale)); }
+  #overlay #skip-btn { font-size: calc(20px * var(--ui-scale)); padding: calc(12px * var(--ui-scale)) calc(30px * var(--ui-scale)); }
+  #difficulty-box { margin-bottom: calc(22px * var(--ui-scale)); }
+  #difficulty-box .diff-title { font-size: calc(18px * var(--ui-scale)); margin-bottom: calc(10px * var(--ui-scale)); }
+  #difficulty-box .diff-btns { gap: calc(12px * var(--ui-scale)); }
+  #difficulty-box .diff-btn { font-size: calc(18px * var(--ui-scale)); padding: calc(10px * var(--ui-scale)) calc(26px * var(--ui-scale)); }
+  /* 右侧竖排按钮：尺寸随缩放，位置按 --btn-size 依次排布，永不互相压盖 */
+  #fullscreen-btn, #help-btn, #level-btn {
+    --btn-size: max(30px, calc(34px * var(--ui-scale)));
+    width: var(--btn-size); height: var(--btn-size);
+    right: max(6px, calc(10px * var(--ui-scale)));
+    top: calc(46px * var(--ui-scale) + 6px);
+  }
+  #fullscreen-btn { font-size: calc(16px * var(--ui-scale)); }
+  #help-btn { font-size: calc(18px * var(--ui-scale)); top: calc(46px * var(--ui-scale) + 6px); }
+  #level-btn { font-size: calc(16px * var(--ui-scale)); top: calc(46px * var(--ui-scale) + 6px); }
+  #fullscreen-btn + #help-btn { top: calc(46px * var(--ui-scale) + 6px + var(--btn-size, 34px) + 6px); }
+  #help-btn + #level-btn { top: calc(46px * var(--ui-scale) + 6px + 2 * (var(--btn-size, 34px) + 6px)); }
+  /* 触摸端热区 ≥44px（视觉尺寸可小，但可点区域不缩水） */
+  @media (pointer: coarse) {
+    #fullscreen-btn, #help-btn, #level-btn {
+      --btn-size: max(44px, calc(34px * var(--ui-scale)));
+    }
+  }
+  /* —— 矮窗口（横屏小高度，如 360px）：收紧 HUD、缩小弹窗，确保不裁切不遮挡 —— */
+  #game-container.compact #ui { height: calc(34px * var(--ui-scale)); font-size: calc(13px * var(--ui-scale)); padding: 0 calc(10px * var(--ui-scale)); }
+  #game-container.compact #ui .score { font-size: calc(16px * var(--ui-scale)); }
+  #game-container.compact #birds-left { font-size: calc(13px * var(--ui-scale)); }
+  #game-container.compact #hint { font-size: calc(11px * var(--ui-scale)); bottom: calc(6px * var(--ui-scale)); }
+  #game-container.compact #overlay h1 { font-size: calc(30px * var(--ui-scale)); margin-bottom: 6px; }
+  #game-container.compact #overlay h2 { font-size: calc(15px * var(--ui-scale)); margin-bottom: calc(12px * var(--ui-scale)); }
+  #game-container.compact #overlay button { font-size: calc(16px * var(--ui-scale)); padding: calc(10px * var(--ui-scale)) calc(30px * var(--ui-scale)); }
+  #game-container.compact #overlay #skip-btn { font-size: calc(14px * var(--ui-scale)); padding: calc(9px * var(--ui-scale)) calc(18px * var(--ui-scale)); }
+  #game-container.compact #difficulty-box { margin-bottom: calc(12px * var(--ui-scale)); }
+  #game-container.compact #difficulty-box .diff-title { font-size: calc(13px * var(--ui-scale)); margin-bottom: 6px; }
+  #game-container.compact #difficulty-box .diff-btn { font-size: calc(13px * var(--ui-scale)); padding: calc(6px * var(--ui-scale)) calc(14px * var(--ui-scale)); }
+  #game-container.compact #help-panel .help-card,
+  #game-container.compact #level-panel .level-card { max-height: 94vh; padding: 12px 14px 10px; }
+  #game-container.compact #help-panel h3,
+  #game-container.compact #level-panel h3 { font-size: 16px; margin-bottom: 8px; }
+  #game-container.compact #help-panel li { font-size: 12px; line-height: 1.5; margin-bottom: 4px; }
+  #game-container.compact #level-grid { gap: 4px; }
+  #game-container.compact #level-grid .level-cell { --cell-min: 36px; font-size: 12px; }
+  /* 极窄 / 极矮屏：关卡网格减列，避免横向裁切（热区仍保持 ≥36px） */
+  @media (max-width: 520px) {
+    #level-grid { grid-template-columns: repeat(5, minmax(36px, 1fr)); }
+    #level-grid .level-cell { --cell-min: 36px; }
+  }
+  /* 极矮窗口（<330px 可视高度）：隐藏底部提示，避免遮挡地面玩法区 */
+  @media (max-height: 330px) {
+    #hint { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="game"></canvas>
+  <div id="ui">
+    <div>🐦 <span id="birds-left"></span></div>
+    <div>分数: <span class="score" id="score">0</span></div>
+    <div>关卡: <span id="level">1</span></div>
+  </div>
+  <button id="fullscreen-btn" title="全屏">⛶</button>
+  <button id="help-btn" title="使用说明">?</button>
+  <button id="level-btn" title="关卡总览">🗺️</button>
+  <div id="help-panel">
+    <div class="help-card">
+      <h3>📖 使用说明</h3>
+      <ul>
+        <li><span class="k">拖拽小鸟</span>：按住小鸟向后拉（可拖拽半径 150px），松手发射；白色虚线为预测弹道</li>
+        <li><span class="k">平移视角</span>：在空白处按住拖动（鼠标左键 / 单指）即可左右移动画面，直接跟手无视差；也可用 <span class="k">← →</span></li>
+        <li><span class="k">空格 / 点击屏幕</span>：触发小鸟技能（轻点一下即算点击，拖动则为平移视角，不会误放技能）</li>
+        <li><span class="k">黄鸟冲刺</span>：触发后沿当前方向加速冲刺，穿透力更强</li>
+        <li><span class="k">黑鸟爆炸</span>：触发后原地爆炸，炸飞周围方块并秒杀附近小猪</li>
+        <li><span class="k">← →</span> 左右移动视角，查看建筑布局；触摸端直接拖动画面更顺手</li>
+        <li><span class="k">↑ ↓</span> 缩放画面（放大 / 缩小）</li>
+        <li><span class="k">难度影响</span>：简单/普通/困难会改变猪血量、方块强度、小鸟数量与爆炸范围</li>
+        <li><span class="k">目标</span>：消灭关卡内所有绿猪（猪头顶有血条，需打空血量）</li>
+        <li>共 <span class="k">100 关</span>：前 5 关固定，第 6 关起随机生成，难度持续递增</li>
+        <li><span class="ultra">第 80 关起进入「究极难」</span>：猪血 ×2、建筑强度 ×2、爆炸半径减半、鸟初速下降、小鸟仅 1~2 只 —— 几乎无法通关，勇士可挑战</li>
+        <li>右侧 <span class="k">⛶</span> 全屏 / <span class="k">?</span> 说明 / <span class="k">🗺️</span> 关卡总览；<span class="k">跳过 ▶▶</span> 可在结算时直接进入下一关</li>
+        <li>建议<span class="k">横屏游玩</span>，体验最佳</li>
+      </ul>
+      <button class="help-close" id="help-close">知道了</button>
+    </div>
+  </div>
+  <div id="level-panel">
+    <div class="level-card">
+      <h3>🗺️ 关卡总览</h3>
+      <div id="level-grid"></div>
+      <button class="level-close" id="level-close">关闭</button>
+    </div>
+  </div>
+  <div id="hint">🎯 拖住小鸟向后拉，松手发射！飞行中点击 / 按空格触发技能</div>
+  <div id="overlay">
+    <h1 id="overlay-title"></h1>
+    <h2 id="overlay-sub"></h2>
+    <div id="difficulty-box">
+      <div class="diff-title">选择难度</div>
+      <div class="diff-btns">
+        <button class="diff-btn" id="diff-easy" data-diff="easy">简单 🟢</button>
+        <button class="diff-btn selected" id="diff-normal" data-diff="normal">普通 🟡</button>
+        <button class="diff-btn" id="diff-hard" data-diff="hard">困难 🔴</button>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button id="skip-btn">跳过 ▶▶</button>
+      <button id="restart-btn">开始游戏</button>
+    </div>
+  </div>
+  <div id="rotate-hint">
+    <div class="icon">📱 ↔️</div>
+    <div class="txt">建议横屏游玩体验更佳</div>
+    <button id="rotate-close">继续游玩</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ==================== 画布 ====================
+  var canvas = document.getElementById('game');
+  var ctx = canvas.getContext('2d');
+  var container = document.getElementById('game-container');
+  var scoreEl = document.getElementById('score');
+  var birdsEl = document.getElementById('birds-left');
+  var levelEl = document.getElementById('level');
+  var overlay = document.getElementById('overlay');
+  var overlayTitle = document.getElementById('overlay-title');
+  var overlaySub = document.getElementById('overlay-sub');
+  var restartBtn = document.getElementById('restart-btn');
+  var skipBtn = document.getElementById('skip-btn');
+
+  var W = 1280, H = 720;          // 逻辑视口（画面尺寸），保持 1280x720
+  var WORLD_W = W * 2;            // 【改动1】横向世界宽度 = 2560（2 倍）
+  var cameraX = 0;                // 【改动1】摄像机横向偏移，范围 0 ~ WORLD_W - W
+  var bgCanvas = null;            // 【改动1】离屏背景缓存（按 WORLD_W 预渲染，防右侧空白 + 省性能）
+  var dpr = window.devicePixelRatio || 1;
+  // 【渲染修复】初始化后备缓冲尺寸与 DPR 基准变换（由下方 syncCanvasResolution 统一处理）
+
+  // —— v4：难度与多端状态 ——
+  var difficulty = 'normal';            // easy | normal | hard
+  var isMobile = (typeof navigator !== 'undefined' &&
+    (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+     (typeof window !== 'undefined' && 'ontouchstart' in window && window.innerWidth < 1024)));
+  var isNarrow = false;                 // 窄屏（竖屏手机）标志，resize 时更新
+  var rotateDismissed = false;          // 用户是否已关闭横屏提示
+
+  // —— v7：UI 缩放改为单一 CSS 变量驱动 ——
+  // 全部 HUD / 按钮 / 弹窗字号与尺寸都用 calc(var(--ui-scale) * N) 表达，
+  // 避免逐元素写内联样式（原 v4 方案在横屏小高度下会互相压盖）。
+  // compact：横屏小高度（如 360px）时进一步收紧，保证不裁切、不遮挡游戏区。
+  var compactHUD = false;               // 是否处于“矮窗口”紧凑模式
+  function applyUIScale(scale, compact) {
+    compactHUD = !!compact;
+    var s = Math.max(0.55, Math.min(1.6, scale));
+    var root = document.documentElement;
+    if (root && root.style && root.style.setProperty) {
+      root.style.setProperty('--ui-scale', String(Math.round(s * 1000) / 1000));
+    }
+    container.classList[compactHUD ? 'add' : 'remove']('compact');
+  }
+
+  // ═══════════ v7：画布分辨率与视口尺寸 ═══════════
+  // gameScale = 后备缓冲像素 / 逻辑像素（W×H）。它同时承载 display 缩放与
+  // devicePixelRatio，因此渲染时只需在清屏后 setTransform(gameScale,...) 即可，
+  // 逻辑坐标始终是 1280×720，相机 / 缩放 / 物理全部不受影响。
+  var gameScale = 1;
+  var lastLayout = { w: 0, h: 0 };
+
+  // 取当前可视视口（visualViewport 能正确反映地址栏收起/展开后的真实尺寸）
+  function readViewportSize() {
+    var vv = window.visualViewport;
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    if (vv && vv.width > 0 && vv.height > 0) {
+      if (vv.width > w) w = vv.width;   // 取较大者：地址栏变化不误判方向
+      if (vv.height > h) h = vv.height;
+    }
+    return { w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) };
+  }
+
+  function isPortraitNow() {
+    var v = readViewportSize();
+    return v.h > v.w * 1.03;            // 3% 容差：容忍地址栏高度差
+  }
+
+  // 竖屏遮罩：竖屏显示、转横屏自动隐藏、遮罩期间暂停游戏输入
+  function updateRotateHint() {
+    var el = document.getElementById('rotate-hint');
+    if (!el) return;
+    var show = isPortraitNow() && !rotateDismissed;
+    if (show) el.classList.add('show'); else el.classList.remove('show');
+  }
+  function rotateMaskVisible() {
+    var el = document.getElementById('rotate-hint');
+    return !!(el && el.classList && el.classList.contains('show'));
+  }
+
+  // 同步后备缓冲尺寸与基准确认变换
+  // 仅在尺寸真正变化时重新分配（重设 width/height 会清空画布并重置变换矩阵）
+  function syncCanvasResolution(displayW, displayH) {
+    dpr = window.devicePixelRatio || 1;
+    var nw = Math.max(1, Math.round(displayW * dpr));
+    var nh = Math.max(1, Math.round(displayH * dpr));
+    if (canvas.width !== nw || canvas.height !== nh) {
+      canvas.width = nw;
+      canvas.height = nh;
+    }
+    gameScale = nw / W;                 // 逻辑 → 后备缓冲
+    // 用 setTransform 而非 scale()，避免 resize 多次调用时累积缩放
+    ctx.setTransform(gameScale, 0, 0, gameScale, 0, 0);
+  }
+
+  function resize() {
+    // —— v7：contain 自适应（保持 16:9）——
+    // vv = 可视视口；layout = 布局视口。横屏时地址栏收起/展开会改变高度，
+    // 取两者较大值，避免误触发竖屏遮罩。
+    var vv = readViewportSize();
+    var winW = Math.max(vv.w, window.innerWidth || 0);
+    var winH = Math.max(vv.h, window.innerHeight || 0);
+    var gameRatio = W / H;              // 1280/720 ≈ 1.778
+    var dispW, dispH;
+    if (winW / winH > gameRatio) {
+      dispH = winH;                     // 窗口更宽：以高度为基准
+      dispW = winH * gameRatio;
+    } else {
+      dispW = winW;                     // 窗口更高（或同比例）：以宽度为基准
+      dispH = winW / gameRatio;
+    }
+    dispW = Math.max(1, Math.round(dispW));
+    dispH = Math.max(1, Math.round(dispH));
+
+    lastLayout.w = winW;
+    lastLayout.h = winH;
+    container.style.width = '100%';
+    container.style.height = '100%';
+    canvas.style.width = dispW + 'px';
+    canvas.style.height = dispH + 'px';
+
+    // —— UI 缩放：按“能装进窗口的比例”计算，并限制在 1.7 倍 ——
+    // 矮窗口（横屏小高度，如 360px）额外进入 compact 模式，收紧 HUD 与弹窗。
+    var scale = Math.min(dispW / W, dispH / H) * Math.min(dpr, 1.7);
+    var compact = dispH < 430 || winH < 430;
+    isNarrow = winW < 700;
+    applyUIScale(scale, compact);
+    if (isNarrow) updateBirdsUI(); // 窄屏切换剩余鸟的显示形式
+
+    updateRotateHint();
+
+    // —— 隐藏浏览器地址栏（iOS Safari 技巧）——
+    if (isMobile && window.scrollTo) window.scrollTo(0, 1);
+
+    // 后备缓冲 / DPR / 基准确认变换：保证清屏范围始终覆盖整个画布（不残留旧帧）
+    syncCanvasResolution(dispW, dispH);
+    // 画布尺寸变化后可见世界范围可能改变，重新夹紧相机，避免出现空白区
+    clampCamera();
+  }
+  function onViewportChange() { resize(); }
+
+  window.addEventListener('resize', onViewportChange);
+  window.addEventListener('orientationchange', function () {
+    // 旋转：按新方向立即重算（遮罩同步切换），再等旋转动画结束补算尺寸
+    rotateDismissed = false;
+    updateRotateHint();
+    resize();
+    setTimeout(function () { rotateDismissed = false; updateRotateHint(); resize(); }, 150);
+    setTimeout(resize, 400);
+  });
+  // visualViewport：地址栏收起/展开、软键盘弹出时重算（同样不会引入残影）
+  if (window.visualViewport && window.visualViewport.addEventListener) {
+    window.visualViewport.addEventListener('resize', onViewportChange);
+    window.visualViewport.addEventListener('scroll', function () {
+      var v = readViewportSize();
+      if (v.w !== lastLayout.w || Math.abs(v.h - lastLayout.h) > 1) resize();
+    });
+  }
+  // —— v7：禁止双击缩放 / 双指缩放 / iOS 手势缩放（Safari 与微信内置浏览器均需要）——
+  function blockGesture(e) { if (e && e.preventDefault) e.preventDefault(); }
+  window.addEventListener('gesturestart', blockGesture, { passive: false });
+  window.addEventListener('gesturechange', blockGesture, { passive: false });
+  window.addEventListener('gestureend', blockGesture, { passive: false });
+  // 双击缩放：300ms 内的第二次 touchend 一律吞掉
+  var lastTouchEnd = 0;
+  window.addEventListener('touchend', function (e) {
+    var now = Date.now();
+    if (now - lastTouchEnd < 300 && e && e.preventDefault) e.preventDefault();
+    lastTouchEnd = now;
+  }, { passive: false });
+  // 阻止页面滚动与橡皮筋（仅在可滚动弹窗内部放行，保证说明/关卡列表可滑动）
+  window.addEventListener('touchmove', function (e) {
+    var t = e.target;
+    while (t && t !== document.body) {
+      if (t.classList && (t.classList.contains('help-card') || t.classList.contains('level-card'))) return;
+      t = t.parentNode;
+    }
+    if (e.cancelable && e.preventDefault) e.preventDefault();
+  }, { passive: false });
+  // 长按选中 / 呼出上下文菜单
+  window.addEventListener('contextmenu', function (e) {
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    if (e && e.preventDefault) e.preventDefault();
+  });
+  window.addEventListener('selectstart', function (e) {
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    if (e && e.preventDefault) e.preventDefault();
+  });
+  // 页面级滚动兜底（iOS 橡皮筋）
+  window.addEventListener('scroll', function () { if (window.scrollY !== 0) window.scrollTo(0, 0); });
+
+  resize();
+  // 首帧后再校正一次：部分移动浏览器首次 innerHeight 含地址栏，稳定后尺寸才准
+  setTimeout(resize, 300);
+
+  // ==================== 物理常量 ====================
+  var GRAVITY = 1200;
+  var GROUND_Y = H - 60;
+  var SLING_X = 220, SLING_Y = GROUND_Y - 90;
+  var MAX_PULL = 100;   // 拖拽范围（弹弓感更强）
+  var POWER = 24;       // 发射力度（最大初速 2400px/s）
+
+  // ==================== 材质表（物理重构）====================
+  // density: 质量密度（mass = density·w·h；圆为 density·π·r²）
+  // rest: 恢复系数；muK/muS: 动/静摩擦系数；angDamp/linDamp: 角/线阻尼
+  // thresh: 破碎冲击阈值（再乘 difficulty 与究极难倍率）
+  var MATERIALS = {
+    wood:  { density: 0.0015, rest: 0.38, muK: 0.22, muS: 0.42, angDamp: 0.88, linDamp: 0.998, thresh: 350 },
+    stone: { density: 0.0026, rest: 0.22, muK: 0.16, muS: 0.32, angDamp: 0.93, linDamp: 0.999, thresh: 850 },
+    deco:  { density: 0.0010, rest: 0.22, muK: 0.28, muS: 0.48, angDamp: 0.82, linDamp: 0.996, thresh: 250 }
+  };
+  // 默认材质（鸟/猪等未标注材质的物体）：保持单位质量与原有弹性手感
+  var DEFAULT_REST = 0.45;
+  var DEFAULT_MU_K = 0.25, DEFAULT_MU_S = 0.55;
+  var DEFAULT_ANG_DAMP = 0.96, DEFAULT_LIN_DAMP = 0.998;
+  function matOf(o) {
+    if (o.deco) return MATERIALS.deco;   // 屋顶装饰件使用 deco 材质参数
+    return MATERIALS[o.mat] || null;
+  }
+  // 破碎阈值：查表后应用难度与究极难倍率
+  function breakThreshold(block) {
+    var m = matOf(block) || MATERIALS.wood;
+    var th = m.thresh;
+    if (difficulty === 'easy') th *= 0.8;
+    else if (difficulty === 'hard') th *= 1.32;
+    if (isUltraLevel()) th *= 2;
+    return th;
+  }
+
+  // ==================== 小鸟定义 ====================
+  // ==================== 小鸟定义 ====================
+  var BIRD_DEFS = {
+    red:    { r: 26, body: '#e74c3c', dark: '#a93226', belly: '#f5b7b1', tip: '普通' },
+    yellow: { r: 22, body: '#f1c40f', dark: '#d4ac0d', belly: '#f9e79f', tip: '冲刺' },
+    black:  { r: 25, body: '#2e4053', dark: '#17202a', belly: '#5d6d7e', tip: '爆炸' }
+  };
+  var BIRD_ICON = { red: '🔴', yellow: '🟡', black: '⚫' };  // 剩余小鸟计数图标
+
+  // ==================== 关卡生成 ====================
+  // 生成规则：
+  // 1. 塔由"两根立柱 + 一根横木"构成一层；立柱必须站在支撑面上（地面或下层横木顶）
+  // 2. 每往上一层，柱间距收窄 50px（金字塔式收窄）
+  // 3. 猪的位置规则：groundPig 站在塔内地面；topPig 站在顶层横木上（无屋顶时）
+  // 4. 可选 A 形木屋顶（两条斜木 + 顶梁），斜木两端搭在顶层横木端部
+  // 5. 塔与塔之间留出 ≥18px 间隙，结构互不重叠
+  // 6. 每只猪有血量 hp（血条），随关卡难度增厚
+
+  // 建造一座塔（供固定关卡与随机关卡共用）
+  function addTower(cx, opts, pigs, blocks) {
+    var mats = opts.mats || ['wood'];
+    var layers = opts.layers || 1;
+    var w = opts.width || 140;          // 底层柱间距
+    var y = GROUND_Y;                   // 当前支撑面（柱底）
+    var hp = opts.hp || 1;              // 本塔内猪的血量
+    var COL_W = 20, BEAM_H = 20;
+    var topW = w;                       // 顶层横木宽度
+
+    for (var L = 0; L < layers; L++) {
+      var mat = mats[Math.min(L, mats.length - 1)] || 'wood';
+      var colH = L === 0 ? 80 : 60;
+      var x1 = cx - w / 2, x2 = cx + w / 2;
+      // 本层立柱：底在支撑面 y 上
+      blocks.push({ x: x1, y: y - colH / 2, w: COL_W, h: colH, type: mat });
+      blocks.push({ x: x2, y: y - colH / 2, w: COL_W, h: colH, type: mat });
+      // 本层横木：架在立柱顶（顶 = y - colH）
+      var beamY = y - colH - 10;
+      blocks.push({ x: cx, y: beamY, w: w + 40, h: BEAM_H, type: mat });
+      topW = w;
+      // 塔内地面猪
+      if (L === 0 && opts.groundPig) pigs.push({ x: cx, y: GROUND_Y - 32, r: 32, hp: hp });
+      y = beamY - 10;   // 下一层支撑面 = 本层横木顶
+      w = Math.max(40, w - 50); // 收窄（最小 40px，防止层数多时柱间距变负）
+    }
+
+    // 顶层横木上的猪（无屋顶平台塔）
+    if (opts.topPig) pigs.push({ x: cx, y: y - 32, r: 32, hp: hp });
+
+    // A 形屋顶：两条斜木 + 顶梁，斜木从顶层横木端部斜向顶点（屋高 80 足够高）
+    // A 形屋顶：两条斜木 + 顶梁，斜木从顶层横木端部斜向顶点（屋高 80）
+    // 端点精确落在横木端部，并下移 2px 使其与横木/顶梁形成可靠接触深度，
+    // 保证 SAT 支撑检测能正确判定屋顶件受支撑
+    if (opts.roof) {
+      var span = topW / 2 + 20;         // 半跨（横木端到顶点）
+      var rise = 80;                    // 屋高
+      var len = Math.sqrt(span * span + rise * rise);
+      var ang = Math.atan2(rise, span);
+      blocks.push({ x: cx - span / 2, y: y - rise / 2 + 2, w: len, h: 12, rot: -ang, type: 'wood', deco: true });
+      blocks.push({ x: cx + span / 2, y: y - rise / 2 + 2, w: len, h: 12, rot: ang, type: 'wood', deco: true });
+      blocks.push({ x: cx, y: y - rise - 4, w: 26, h: 14, type: 'wood', deco: true }); // 顶梁
+    }
+  }
+
+  // 固定 5 关（教学 → 三塔大城堡），猪血随关卡增厚
+  function generateLevel(idx) {
+    var pigs = [], blocks = [];
+    var d = idx + 1;
+    var hpByLevel = [1, 2, 2, 3, 3];
+
+    var birds;
+    if (d === 1) birds = ['red', 'red'];
+    else if (d === 2) birds = ['red', 'red', 'yellow'];
+    else if (d === 3) birds = ['red', 'yellow', 'black'];
+    else if (d === 4) birds = ['red', 'yellow', 'black', 'red'];
+    else birds = ['red', 'yellow', 'black', 'red', 'yellow'];
+
+    var hp = hpByLevel[idx];
+
+    if (d === 1) {
+      // 第 1 关：教学关——一只完全暴露的猪，学会拖拽瞄准
+      pigs.push({ x: 800, y: GROUND_Y - 32, r: 32, hp: 1 });
+    } else if (d === 2) {
+      // 第 2 关：屋顶木塔 + 双层木平台塔
+      addTower(860, { layers: 2, width: 170, mats: ['wood', 'wood'], groundPig: true, roof: true, hp: hp }, pigs, blocks);
+      addTower(1090, { layers: 2, width: 150, mats: ['wood', 'wood'], topPig: true, hp: hp }, pigs, blocks);
+    } else if (d === 3) {
+      // 第 3 关：三层屋顶大木塔 + 双层石木塔
+      addTower(830, { layers: 3, width: 180, mats: ['wood', 'wood', 'stone'], groundPig: true, roof: true, hp: hp }, pigs, blocks);
+      addTower(1130, { layers: 2, width: 160, mats: ['stone', 'wood'], groundPig: true, topPig: true, hp: hp }, pigs, blocks);
+    } else if (d === 4) {
+      // 第 4 关：三塔大城堡（三层木石主塔 + 三层屋顶塔 + 双层石塔）
+      addTower(790, { layers: 3, width: 165, mats: ['wood', 'stone', 'stone'], groundPig: true, topPig: true, hp: hp }, pigs, blocks);
+      addTower(1000, { layers: 3, width: 150, mats: ['stone', 'wood', 'stone'], groundPig: true, roof: true, hp: hp }, pigs, blocks);
+      addTower(1190, { layers: 2, width: 120, mats: ['stone', 'stone'], topPig: true, hp: hp }, pigs, blocks);
+    } else {
+      // 第 5 关：巨型城堡（四层主塔 + 三层屋顶塔 + 双层石塔）
+      addTower(720, { layers: 4, width: 180, mats: ['wood', 'stone', 'stone', 'wood'], groundPig: true, topPig: true, hp: hp }, pigs, blocks);
+      addTower(1000, { layers: 3, width: 170, mats: ['stone', 'wood', 'stone'], groundPig: true, roof: true, hp: hp }, pigs, blocks);
+      addTower(1190, { layers: 2, width: 110, mats: ['wood', 'stone'], topPig: true, hp: hp }, pigs, blocks);
+    }
+
+    return { birds: birds, pigs: pigs, blocks: blocks };
+  }
+
+  // 确定性随机数（同一 diff 生成同一布局，重试/重进关卡不变）
+  function makeRng(seed) {
+    var s = seed >>> 0;
+    return function () {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  // 【改动3】随机关卡（第 6~100 关）：难度随 diff（1~95）递增，第 80 关后进入究极难
+  // diff 与关卡号关系：关卡号 = idx + 1，第 6 关 idx=5 → diff=1；第 100 关 idx=99 → diff=95
+  // 究极难判定：diff >= 75（即第 80 关起）
+  var ULTRA_DIFF = 75;
+  function isUltraDiff(diff) { return diff >= ULTRA_DIFF; }
+
+  function ultraHp(diff) {
+    // 普通段：3 关 +1 血，上限 30；究极段：30 起每 1.5 关 +1，上限 80
+    if (isUltraDiff(diff)) {
+      return Math.min(80, 30 + Math.floor((diff - ULTRA_DIFF) / 1.5));
+    }
+    return Math.min(30, 2 + Math.floor(diff / 3));
+  }
+
+  function generateRandomLevel(diff) {
+    var pigs = [], blocks = [];
+    var rng = makeRng(diff * 7919 + 13);
+    var ultra = isUltraDiff(diff);
+    var hp = ultraHp(diff);
+
+    // 小鸟编队：数量随难度递减；究极段固定 1~2 只，且至少一只黑鸟
+    var birds = [];
+    var pool = ['red', 'yellow', 'black'];
+    var birdCount = ultra ? (1 + (rng() < 0.5 ? 1 : 0))
+                          : Math.max(1, 7 - Math.floor(diff / 12));
+    for (var i = 0; i < birdCount; i++) birds.push(pool[Math.floor(rng() * 3)]);
+    if (diff >= 1 && birds.indexOf('black') < 0) birds[0] = 'black';
+
+    var towerCount = ultra ? 5 : Math.min(5, 2 + Math.floor(diff / 12));
+    var stoneChance = ultra ? 0.95 : Math.min(0.95, 0.15 + diff * 0.012);
+
+    // 【改动1】塔位扩展到 cx 700 ~ 2400，充分利用 2 倍宽世界（间距充足，结构不重叠）
+    var spanStart = 700, spanEnd = 2400;
+    var positions = [];
+    if (towerCount === 1) {
+      positions.push(1200 + rng() * 60);
+    } else {
+      var gap = (spanEnd - spanStart) / (towerCount - 1);
+      for (var t0 = 0; t0 < towerCount; t0++) {
+        positions.push(spanStart + t0 * gap + (rng() * 2 - 1) * Math.min(30, gap * 0.12));
+      }
+    }
+
+    for (var t = 0; t < towerCount; t++) {
+      var cx = positions[t];
+      var layers = ultra ? (10 + Math.floor(rng() * 3))
+                         : Math.min(10, 1 + Math.floor(rng() * 2) + Math.floor(diff / 8));
+      var mats = [];
+      for (var L = 0; L < layers; L++) mats.push(rng() < stoneChance ? 'stone' : 'wood');
+      var width = 130 + Math.floor(rng() * 30);
+      var opts = { layers: layers, width: width, mats: mats, hp: hp };
+      var hasRoof = rng() < 0.3;
+      if (hasRoof) {
+        opts.roof = true;
+        opts.groundPig = true; // 屋顶塔的猪在屋内
+      } else if (rng() < 0.45) {
+        opts.topPig = true;
+      }
+      if (!opts.groundPig && !opts.topPig && rng() < 0.65) opts.groundPig = true;
+      if (!opts.groundPig && !opts.topPig) opts.groundPig = true; // 每塔至少一只猪
+      addTower(cx, opts, pigs, blocks);
+    }
+
+    return { birds: birds, pigs: pigs, blocks: blocks, ultra: ultra };
+  }
+
+  // ==================== 实体 ====================
+  function Body(x, y, w, h, r) {
+    this.x = x; this.y = y;
+    this.w = w; this.h = h;
+    this.r = r || 0;        // >0 表示圆形
+    this.vx = 0; this.vy = 0;
+    this.rot = 0; this.vrot = 0;
+    this.awake = false;     // 是否参与物理
+    this.dead = false;
+    this.static = false;    // 弹弓上的待发射鸟
+    // 材质：方块在 loadLevel 中挂 mat（'wood'/'stone'）+ deco 标记；
+    // 鸟/猪无材质 → 使用默认参数（单位质量）
+  }
+  // —— 质量与转动惯量（材质表驱动）——
+  Body.prototype.mass = function () {
+    var m = matOf(this);
+    if (!m) return this.type === 'bird' ? 2.0 : 1;      // 鸟质量 ×2（冲击力更强），猪：1
+    if (this.r > 0) return m.density * Math.PI * this.r * this.r;
+    return m.density * this.w * this.h;
+  };
+  Body.prototype.inertia = function () {
+    var mm = this.mass();
+    if (this.r > 0) return 0.5 * mm * this.r * this.r;   // 圆盘
+    return mm * (this.w * this.w + this.h * this.h) / 12; // 矩形
+  };
+  // 角冲量力臂（切向冲量作用点距中心的等效距离）
+  Body.prototype.arm = function () {
+    if (this.r > 0) return this.r * 0.5;
+    return Math.sqrt(this.w * this.w + this.h * this.h) / 2 * 0.5;
+  };
+  // 旋转感知的包围盒半宽/半高（圆形直接返回半径）
+  Body.prototype.halfW = function () {
+    if (this.r > 0) return this.r;
+    var c = Math.abs(Math.cos(this.rot)), s = Math.abs(Math.sin(this.rot));
+    return (this.w / 2) * c + (this.h / 2) * s;
+  };
+  Body.prototype.halfH = function () {
+    if (this.r > 0) return this.r;
+    var c = Math.abs(Math.cos(this.rot)), s = Math.abs(Math.sin(this.rot));
+    return (this.w / 2) * s + (this.h / 2) * c;
+  };
+  Object.defineProperties(Body.prototype, {
+    left:   { get: function () { return this.x - this.halfW(); } },
+    right:  { get: function () { return this.x + this.halfW(); } },
+    top:    { get: function () { return this.y - this.halfH(); } },
+    bottom: { get: function () { return this.y + this.halfH(); } }
+  });
+
+  var bodies = [];
+  var pigs = [];
+  var blocks = [];
+
+  // ==================== 状态 ====================
+  var score = 0;
+  var currentLevel = 0;
+  var gameState = 'menu'; // menu | ready | flying | over
+  var currentBird = null;
+  var remainingBirds = [];
+  var dragging = false;
+  var dragStart = { x: 0, y: 0 };
+  var suppressClick = false;
+  var lastResult = null;
+  var particles = [];
+  var floatTexts = [];
+  var shakeT = 0;
+  var supportTick = 0;        // 【改动1 性能】支撑检测帧计数器
+  var supportDirty = false;   // 破坏事件后强制立即检测支撑
+  var zoom = 1;               // 【功能4】画面缩放，范围 0.5 ~ 2.0（仅渲染层，不影响物理）
+  var manualCameraTimer = 0;  // 【功能2】手动控制摄像机的剩余锁定时间（秒）
+
+  // ═══════════ v7：视角平移手势状态机 ═══════════
+  // mode: null(空闲) | 'pending'(按下未定) | 'bird'(发射拖拽) | 'pan'(平移视角)
+  // 冲突判定：命中小鸟 → bird；否则 pending，位移超过 PAN_SLOP 才升级为 pan，
+  // 未超过则松手时视为点击（保留"飞行中点击触发技能"）。
+  var PAN_SLOP = 10;          // 判定为平移的位移阈值（px，屏幕坐标）
+  var panning = false;        // 是否正在拖动平移视角（主循环据此接管相机）
+  var gestureMode = null;
+  var gestureId = null;       // 当前 pointerId
+  var gestureStart = { x: 0, y: 0 };      // 起始屏幕坐标
+  var gestureStartCam = 0;                // 起始 cameraX（保持跟手，无漂移）
+  var panMoved = 0;                       // 本次手势累计位移
+  var gestureDuration = 0;                // 按下时长（秒）
+  var GESTURE_TAP_SEC = 0.25;             // 「短按」上限，超过则不算点击
+  var gestureWasTap = false;              // 上一次手势是否已按点击处理（吞掉后续 click）
+
+  // ==================== 关卡加载 ====================
+  function makeBird(type) {
+    var def = BIRD_DEFS[type];
+    var b = new Body(SLING_X, SLING_Y, def.r * 2, def.r * 2, def.r);
+    b.type = 'bird';
+    b.birdType = type;
+    b.static = true;
+    return b;
+  }
+
+  var TOTAL_LEVELS = 100;   // 【改动3】共 100 关（前 5 关固定，6~100 随机生成递增难度）
+
+  function loadLevel(idx) {
+    // 【改动3】前 5 关固定关卡；第 6~100 关随机生成，diff = idx - 4（1~95）
+    var def = (idx < 5) ? generateLevel(idx) : generateRandomLevel(idx - 4);
+    bodies = []; pigs = []; blocks = [];
+    score = 0;
+    currentLevel = idx;
+    gameState = 'ready';
+    lastResult = null;
+    cameraX = 0;                    // 【改动1】每关回到世界左端起点
+    overlay.classList.remove('show');
+    skipBtn.style.display = 'none'; // 游戏进行中隐藏跳过按钮
+    document.getElementById('difficulty-box').classList.remove('show');
+    particles = [];    // —— v3：清空粒子与飘字，避免上一局残留 ——
+    floatTexts = [];
+    shakeT = 0;
+    scoreEl.textContent = String(Math.floor(score));
+    // 【改动3】关卡显示：前 5 关"关卡 X"，6~100 关"关卡 X/100"，第 80 关起加"究极难"
+    var ultra = idx >= ULTRA_DIFF + 4;   // 第 80 关（idx=79 ⇒ diff=75）起
+    if (idx < 5) {
+      levelEl.textContent = '关卡 ' + (idx + 1);
+    } else {
+      levelEl.textContent = '关卡 ' + (idx + 1) + '/' + TOTAL_LEVELS + (ultra ? ' 究极难' : '');
+    }
+
+    // —— v3：难度调整——鸟的数量（简单 +1 红鸟，困难 -1 非黑鸟，且总数 > 2 才减）——
+    remainingBirds = def.birds.slice();
+    if (difficulty === 'easy') {
+      remainingBirds.push('red');
+    } else if (difficulty === 'hard' && remainingBirds.length > 2) {
+      var rmIdx = -1;
+      for (var ri = 0; ri < remainingBirds.length; ri++) {
+        if (remainingBirds[ri] !== 'black') { rmIdx = ri; break; }
+      }
+      if (rmIdx >= 0) remainingBirds.splice(rmIdx, 1);
+    }
+    spawnNextBird();
+
+    // —— v3：难度调整——猪的血量系数（简单 0.8 / 普通 1.0 / 困难 1.4，取整至少 1）——
+    // 【改动3】第 80 关起（究极难）：血量系数再 ×2
+    var hpMult = difficulty === 'easy' ? 0.8 : (difficulty === 'hard' ? 1.4 : 1.0);
+    if (ultra) hpMult *= 2;
+    def.pigs.forEach(function (p) {
+      var pig = new Body(p.x, p.y, p.r * 2, p.r * 2, p.r);
+      pig.type = 'pig';
+      pig.hp = Math.max(1, Math.round((p.hp || 1) * hpMult)); // 血量（血条）
+      pig.maxHp = pig.hp;
+      pig.lastDamageTime = 0; // —— v3：伤害冷却时间戳 ——
+      bodies.push(pig);
+      pigs.push(pig);
+    });
+
+    def.blocks.forEach(function (b) {
+      var blk = new Body(b.x, b.y, b.w, b.h, 0);
+      blk.type = 'block';
+      blk.mat = b.type;
+      blk.rot = b.rot || 0; // 屋顶斜木等旋转件
+      blk.deco = b.deco || false; // 屋顶装饰件标记（仅用于更高的旋转阻尼）
+      bodies.push(blk);
+      blocks.push(blk);
+    });
+
+    // —— v3：创建左右空气墙（不可见静态墙，只反弹不伤害不破碎）——
+    function makeWall(x) {
+      var wall = new Body(x, GROUND_Y / 2, 20, GROUND_Y * 2, 0);
+      wall.type = 'wall';
+      wall.isWall = true;
+      wall.awake = false;   // 不参与重力/积分
+      bodies.push(wall);
+      return wall;
+    }
+    makeWall(-10);          // 左墙
+    makeWall(WORLD_W + 10); // 【改动1】右墙移到世界右端（2560）
+
+    // 生成后支撑校验：对每块（含屋顶斜木等旋转件）用接触法线法判定支撑状态，
+    // 异常无支撑的块立即唤醒（正常情况下所有块都应受支撑而保持静止）
+    bodies.forEach(function (b) {
+      if (b.type !== 'block') return;
+      if (!hasSupport(b)) b.awake = true;
+    });
+
+    updateBirdsUI();
+  }
+
+  function spawnNextBird() {
+    if (remainingBirds.length > 0) {
+      var type = remainingBirds.shift();
+      currentBird = makeBird(type);
+      bodies.push(currentBird); // 加入物理世界
+    } else {
+      currentBird = null;
+    }
+    updateBirdsUI();
+  }
+
+  function updateBirdsUI() {
+    // —— v4：启动早期（菜单）可能尚无关卡数据，安全兜底 ——
+    remainingBirds = remainingBirds || [];
+    // —— v3：窄屏用数字计数，宽屏用图标串；v7：横屏矮窗口也用数字，省 HUD 空间 ——
+    if (isNarrow || compactHUD) {
+      var count = remainingBirds.length + (currentBird && currentBird.static ? 1 : 0);
+      birdsEl.textContent = '×' + count;
+      return;
+    }
+    var html = '';
+    remainingBirds.forEach(function (t) {
+      html += BIRD_ICON[t] || '';
+    });
+    birdsEl.textContent = html;
+  }
+
+  function showMenu() {
+    gameState = 'menu';
+    overlay.classList.add('show');
+    overlayTitle.textContent = '🐦 愤怒的小鸟';
+    overlaySub.textContent = '拖拽小鸟瞄准，消灭所有绿猪！5 个固定关卡，之后无尽随机生成';
+    restartBtn.textContent = '开始游戏';
+    skipBtn.style.display = 'none';
+    document.getElementById('difficulty-box').classList.add('show'); // —— v3：显示难度选择 ——
+    lastResult = null;
+  }
+
+  // ==================== 碰撞检测（分离轴定理 SAT）====================
+  // 所有碰撞返回的法线 (nx,ny) 统一约定为"从 a 指向 b"，
+  // 使 resolveCollision 的 relN/impact 符号对所有碰撞类型一致：
+  // relN < 0 = 正在接近（impact = -relN > 0）
+  // 支持：圆vs圆 / 旋转矩形vs圆 / 旋转矩形vs旋转矩形 / 轴对齐矩形（SAT 特例）
+
+  function circleVsCircle(a, b) {
+    var dx = b.x - a.x, dy = b.y - a.y;
+    var min = a.r + b.r;
+    var d2 = dx * dx + dy * dy;
+    if (d2 >= min * min || d2 === 0) return null;
+    var d = Math.sqrt(d2);
+    return { nx: dx / d, ny: dy / d, depth: min - d };
+  }
+
+  // 矩形（含旋转）的 4 个世界坐标顶点
+  function polyCorners(b) {
+    var hw = b.w / 2, hh = b.h / 2;
+    var cos = Math.cos(b.rot), sin = Math.sin(b.rot);
+    var ax = hw * cos, ay = hw * sin;    // 局部 (+hw, 0) 旋转
+    var bx = -hh * sin, by = hh * cos;   // 局部 (0, +hh) 旋转
+    return [
+      { x: b.x + ax + bx, y: b.y + ay + by },
+      { x: b.x + ax - bx, y: b.y + ay - by },
+      { x: b.x - ax - bx, y: b.y - ay - by },
+      { x: b.x - ax + bx, y: b.y - ay + by }
+    ];
+  }
+
+  function projectPoly(verts, axis) {
+    var min = Infinity, max = -Infinity;
+    for (var i = 0; i < verts.length; i++) {
+      var d = verts[i].x * axis.x + verts[i].y * axis.y;
+      if (d < min) min = d;
+      if (d > max) max = d;
+    }
+    return { min: min, max: max };
+  }
+
+  // 多边形（矩形）vs 多边形（矩形）：SAT，8 条分离轴
+  function polyVsPoly(a, b) {
+    var va = polyCorners(a), vb = polyCorners(b);
+    var axes = [];
+    var i, j;
+    // a 的 4 条边法线
+    for (i = 0; i < 4; i++) {
+      j = (i + 1) % 4;
+      var ex = va[j].x - va[i].x, ey = va[j].y - va[i].y;
+      var len = Math.sqrt(ex * ex + ey * ey);
+      if (len > 1e-6) axes.push({ x: -ey / len, y: ex / len });
+    }
+    // b 的 4 条边法线
+    for (i = 0; i < 4; i++) {
+      j = (i + 1) % 4;
+      var ex2 = vb[j].x - vb[i].x, ey2 = vb[j].y - vb[i].y;
+      var len2 = Math.sqrt(ex2 * ex2 + ey2 * ey2);
+      if (len2 > 1e-6) axes.push({ x: -ey2 / len2, y: ex2 / len2 });
+    }
+    var minOverlap = Infinity, best = null;
+    for (var k = 0; k < axes.length; k++) {
+      var pa = projectPoly(va, axes[k]);
+      var pb = projectPoly(vb, axes[k]);
+      var overlap = Math.min(pa.max, pb.max) - Math.max(pa.min, pb.min);
+      // 容差：允许 ≤0.5px 的微小间隙视为接触（精确堆叠的支撑面深度为 0，仍算接触）
+      if (overlap <= -0.5) return null; // 找到分离轴 → 不相交
+      if (overlap < minOverlap) { minOverlap = overlap; best = axes[k]; }
+    }
+    // 法线方向修正为"从 a 指向 b"
+    var dx = b.x - a.x, dy = b.y - a.y;
+    if (dx * best.x + dy * best.y < 0) { best.x = -best.x; best.y = -best.y; }
+    return { nx: best.x, ny: best.y, depth: minOverlap };
+  }
+
+  // 圆形 vs 多边形（矩形，含旋转）：SAT
+  // 分离轴 = 矩形的两条边法线 + 圆心到 4 个顶点的方向
+  // 返回的法线从矩形(p)指向圆(c)，由调用方翻转统一为 a→b
+  function circleVsPoly(c, p) {
+    var verts = polyCorners(p);
+    var axes = [];
+    var i;
+    // 矩形两条边法线（4 条边只有 2 个独立方向）
+    for (i = 0; i < 2; i++) {
+      var j = (i + 1) % 4;
+      var ex = verts[j].x - verts[i].x, ey = verts[j].y - verts[i].y;
+      var len = Math.sqrt(ex * ex + ey * ey);
+      if (len > 1e-6) axes.push({ x: -ey / len, y: ex / len });
+    }
+    // 圆心到各顶点的方向（处理圆-顶点/圆-角接触）
+    for (i = 0; i < 4; i++) {
+      var dx = c.x - verts[i].x, dy = c.y - verts[i].y;
+      var len2 = Math.sqrt(dx * dx + dy * dy);
+      if (len2 > 1e-6) axes.push({ x: dx / len2, y: dy / len2 });
+    }
+    var minOverlap = Infinity, best = null;
+    for (var k = 0; k < axes.length; k++) {
+      var ax = axes[k];
+      var pa = projectPoly(verts, ax);
+      var cc = c.x * ax.x + c.y * ax.y; // 圆心投影
+      var overlap = Math.min(pa.max, cc + c.r) - Math.max(pa.min, cc - c.r);
+      if (overlap <= -0.5) return null; // 容差同 polyVsPoly
+      if (overlap < minOverlap) { minOverlap = overlap; best = ax; }
+    }
+    // 法线从矩形指向圆
+    var dxc = c.x - p.x, dyc = c.y - p.y;
+    if (dxc * best.x + dyc * best.y < 0) { best.x = -best.x; best.y = -best.y; }
+    return { nx: best.x, ny: best.y, depth: minOverlap };
+  }
+
+  function getCollision(a, b) {
+    var aC = a.r > 0, bC = b.r > 0;
+    if (aC && bC) return circleVsCircle(a, b); // a→b
+    if (aC && !bC) {
+      // circleVsPoly(a=圆, b=矩) 返回 矩→圆（b→a），翻转得到 a→b
+      var c1 = circleVsPoly(a, b);
+      if (c1) return { nx: -c1.nx, ny: -c1.ny, depth: c1.depth };
+      return null;
+    }
+    if (!aC && bC) {
+      // circleVsPoly(b=圆, a=矩) 返回 矩→圆（a→b），直接用
+      return circleVsPoly(b, a);
+    }
+    return polyVsPoly(a, b); // a→b
+  }
+
+  function resolveCollision(a, b) {
+    if (a.dead || b.dead) return; // 已破碎/移除的物体不再参与碰撞
+    if (!a.awake && !b.awake) return;
+    // 弹弓上待发射的鸟不参与碰撞
+    if ((a === currentBird && a.static) || (b === currentBird && b.static)) return;
+    var col = getCollision(a, b);
+    if (!col) return;
+
+    // —— v3：空气墙处理（isWall）：不可移动、不可破碎、不造成伤害，仅位置分离 + 速度反弹 ——
+    if (a.isWall || b.isWall) {
+      var wall = a.isWall ? a : b;
+      var other = a.isWall ? b : a;
+      var dir = a.isWall ? 1 : -1; // other 的推离方向（沿法线 +dir）
+      var nx2 = col.nx, ny2 = col.ny, dp = col.depth;
+      if (dp <= 0) return;
+      // 位置分离：只推 other（墙不动）
+      other.x += nx2 * dp * dir;
+      other.y += ny2 * dp * dir;
+      // 速度反弹（法向反射 + 轻微恢复）
+      var vn = other.vx * nx2 + other.vy * ny2;
+      var toward = (a.isWall ? -vn : vn); // >0 = 朝墙运动
+      if (toward > 0) {
+        var e2 = other.r > 0 ? 0.5 : 0.3;
+        other.vx -= (1 + e2) * vn * nx2;
+        other.vy -= (1 + e2) * vn * ny2;
+      }
+      // 摩擦：削减切向滑行与旋转
+      other.vx *= 0.96;
+      other.vrot *= 0.85;
+      other.awake = true;
+      return;
+    }
+
+    var aWasStatic = !a.awake;
+    var bWasStatic = !b.awake;
+    a.awake = true;
+    b.awake = true;
+
+    var nx = col.nx, ny = col.ny, depth = col.depth;
+    if (depth <= 0.001) return;
+
+    // —— 质量/转动惯量：材质表驱动 ——
+    var ma = a.mass(), mb = b.mass();
+    var tot = ma + mb;
+
+    // —— 改 1：Baumgarte 位置校正（SLOP 容差 + 修正比例，仅当 corr>0 时推开）——
+    var SLOP = 0.5, PERCENT = 0.4;
+    function positionCorrect() {
+      var corr = Math.max(depth - SLOP, 0) * PERCENT;
+      if (corr <= 0) return;
+      a.x -= nx * corr * (mb / tot);
+      a.y -= ny * corr * (mb / tot);
+      b.x += nx * corr * (ma / tot);
+      b.y += ny * corr * (ma / tot);
+    }
+
+    // 相对速度分解：法向（撞击）与切向（刮擦 → 旋转）
+    var relVx = b.vx - a.vx, relVy = b.vy - a.vy;
+    var relN = relVx * nx + relVy * ny;
+    var impact = -relN; // 接近速度（>0 表示正在撞向彼此）
+
+    // —— 改 2：速度死区 —— 极低速浅接触：不反弹、不加随机旋转；
+    // 消除法向接近速度（e=0 静止接触约束）＋ 轻度切向摩擦（抑制微滑移抽搐）＋ 位置校正
+    if (Math.abs(relN) < 10 && depth < 1.2) {
+      positionCorrect();
+      if (relN < 0) {
+        var j0 = -relN / (1 / ma + 1 / mb);
+        a.vx -= (j0 * nx) / ma; a.vy -= (j0 * ny) / ma;
+        b.vx += (j0 * nx) / mb; b.vy += (j0 * ny) / mb;
+      }
+      // 轻度切向摩擦（冲量限幅 ±0.5）
+      var tx0 = -ny, ty0 = nx;
+      var relT0 = (b.vx - a.vx) * tx0 + (b.vy - a.vy) * ty0;
+      var mu0 = Math.min(
+        matOf(a) ? matOf(a).muK : DEFAULT_MU_K,
+        matOf(b) ? matOf(b).muK : DEFAULT_MU_K
+      ) * 0.5;
+      var jt0 = -relT0 * mu0;
+      if (jt0 > 0.5) jt0 = 0.5;
+      else if (jt0 < -0.5) jt0 = -0.5;
+      a.vx -= (jt0 * tx0) / ma; a.vy -= (jt0 * ty0) / ma;
+      b.vx += (jt0 * tx0) / mb; b.vy += (jt0 * ty0) / mb;
+      return;
+    }
+
+    if (impact > 0) {
+      // 方块破碎判定（先于冲量：撞碎则鸟保持速度穿过，更真实）
+      // 阈值查材质表（wood 500 / stone 1200 / deco 350），并应用难度与究极难倍率
+      var block = null;
+      if (a.type === 'block' && !a.dead) block = a;
+      else if (b.type === 'block' && !b.dead) block = b;
+      if (block) {
+        if (impact > breakThreshold(block)) smash(block);
+      }
+      var smashedNow = block && block.dead;
+
+      if (!smashedNow) {
+        // 材质恢复系数（wood 0.30 / stone 0.15 / deco 0.20；鸟·猪 默认 0.45）
+        var ea = matOf(a) ? matOf(a).rest : DEFAULT_REST;
+        var eb = matOf(b) ? matOf(b).rest : DEFAULT_REST;
+        var e = Math.min(ea, eb);
+
+        // 法向冲量（反弹）
+        var j = (1 + e) * impact * ((ma * mb) / tot);
+        a.vx -= (j * nx) / ma; a.vy -= (j * ny) / ma;
+        b.vx += (j * nx) / mb; b.vy += (j * ny) / mb;
+
+        // —— 改 6：静/动摩擦（相对切向速率 < 20 用静摩擦系数；取两者较小值）——
+        var tx = -ny, ty = nx;
+        var relT = relVx * tx + relVy * ty;
+        var muA = matOf(a) ? matOf(a) : { muK: DEFAULT_MU_K, muS: DEFAULT_MU_S };
+        var muB = matOf(b) ? matOf(b) : { muK: DEFAULT_MU_K, muS: DEFAULT_MU_S };
+        var mu = (Math.abs(relT) < 20) ? Math.min(muA.muS, muB.muS)
+                                       : Math.min(muA.muK, muB.muK);
+        var jt = -relT * mu;
+        var maxJt = j * 0.4; // 摩擦冲量上限（库仑：jt ≤ μ·j）
+        if (Math.abs(jt) > maxJt) jt = (jt > 0 ? maxJt : -maxJt);
+        a.vx -= (jt * tx) / ma; a.vy -= (jt * ty) / ma;
+        b.vx += (jt * tx) / mb; b.vy += (jt * ty) / mb;
+
+        // —— 改 4：切向冲量产生角速度，用转动惯量（Δω = 力臂×jt / I × 0.22 抑制自旋）——
+        var ia = a.inertia(), ib = b.inertia();
+        if (ia > 0) a.vrot -= (a.arm() * jt) / ia * 0.22;
+        if (ib > 0) b.vrot += (b.arm() * jt) / ib * 0.22;
+      }
+
+      // 猪被撞击扣血 —— 误伤修复（改 10：水平撞击同样有效，仅保留冲击门槛 + 冷却）——
+      //  1. impact > 300（排除微冲击）
+      //  2. 猪在最近 0.2 秒内未受过伤（lastDamageTime 冷却）
+      // 伤害映射：damage = min(5, max(1, floor(impact / 200)))
+      var pig = null;
+      if (a.type === 'pig' && !a.dead) pig = a;
+      else if (b.type === 'pig' && !b.dead) pig = b;
+      var now = Date.now();
+      if (pig && impact > 300 && (now - pig.lastDamageTime > 200)) {
+        var dmg = Math.max(1, Math.min(5, Math.floor(impact / 200)));
+        damagePig(pig, dmg);
+        pig.lastDamageTime = now;
+      }
+    }
+
+    // 位置校正（Baumgarte）：正常碰撞路径也执行
+    positionCorrect();
+
+    // 唤醒"踢一脚"：仅在明显撞击时给被撞醒物体速度（阈值 150，系数 0.5）
+    if (impact > 150) {
+      var kick = impact * 0.5;
+      if (aWasStatic) { a.vx += nx * kick; a.vy += ny * kick; }
+      if (bWasStatic) { b.vx -= nx * kick; b.vy -= ny * kick; }
+    }
+
+    // —— 改 5：随机旋转进一步受限（阈值 100→500，幅度 ×0.25）——
+    if (impact > 500) {
+      a.vrot += (Math.random() - 0.5) * 0.25;
+      b.vrot += (Math.random() - 0.5) * 0.25;
+    }
+  }
+
+  // 方块破碎：断裂消失，产生碎片粒子，并唤醒站在它上面/周围的物体（让塔垮塌）
+  // 连锁倒塌：每帧的支撑检测会对所有沉睡块重新判定 hasSupport——
+  // 下层支撑破碎后，上层块失去支撑会立即被唤醒坠落，形成完整的递归连锁倒塌
+  function smash(block) {
+    if (block.dead) return;
+    block.dead = true;
+    supportDirty = true; // 【改动1 性能】破坏后强制立即重算支撑，保证连锁倒塌即时
+    var pts = block.mat === 'stone' ? 200 : 100;
+    score += pts;
+    addFloatText(block.x, block.y, '+' + pts);
+    addParticles(block.x, block.y, block.mat === 'stone' ? 18 : 14,
+      block.mat === 'stone' ? '#b0b0b0' : '#c49a4a');
+    updateScore();
+    // 唤醒水平重叠且在其上方的物体（先给一个下坠速度，加快连锁）；
+    // 更上层的物体由后续物理步的 hasSupport 检测自动唤醒
+    bodies.forEach(function (o) {
+      if (o === block || o.dead) return;
+      if (o.type === 'pig' || o.type === 'block') {
+        // 用 SAT 检查是否与碎块重叠/接触（旋转块也准确）
+        var col = getCollision(block, o);
+        if (col && o.top < block.bottom + 2) {
+          o.awake = true;
+          o.vy += 60; // 【修 bug】y 向下为正：应为下坠（原 -= 60 是向上）
+        }
+      }
+    });
+  }
+
+  // ==================== 物理步进 ====================
+  // 地面碰撞：材质动摩擦 + 静摩擦（上方有物体压住且低速 → 直接停住，消除蠕动）
+  function groundCollide(b) {
+    if (!b.awake || b.isWall) return;
+    if (b.bottom > GROUND_Y) {
+      b.y = GROUND_Y - b.halfH();
+      if (b.vy > 80) {
+        var pts = Math.min(15, Math.floor(b.vy / 120));
+        score += pts;
+        updateScore();
+      }
+      b.vy = -b.vy * 0.3;
+
+      // —— 改 7：地面静/动摩擦 ——
+      var pressed = false;
+      for (var i = 0; i < bodies.length; i++) {
+        var o = bodies[i];
+        if (o === b || o.dead || o.isWall) continue;
+        if (o.y >= b.y) continue;                       // 只看上方物体
+        if (Math.abs(o.x - b.x) > (o.halfW() + b.halfW())) continue;
+        if (Math.abs(o.bottom - b.top) < 6) { pressed = true; break; } // 压在地面块上方
+      }
+      if (Math.abs(b.vx) < 25 && pressed) {
+        b.vx = 0;                                       // 静摩擦：被压住直接停
+      } else {
+        var mk = matOf(b) ? (matOf(b).muK + 0.5) : 0.8; // 动摩擦（wood 0.85 / stone 0.75）
+        b.vx *= mk;
+      }
+      // —— 改 7：地面角速度强衰减 + 角速度死区（消除落地后自旋抽搐）——
+      b.vrot *= (b.r > 0 ? 0.80 : 0.35);
+      if (Math.abs(b.vrot) < 0.6) b.vrot = 0;
+      if (Math.abs(b.vy) < 25) b.vy = 0;
+      if (Math.abs(b.vx) < 12) b.vx = 0;
+    }
+  }
+
+  // 支撑检测（基于接触点法线）：
+  // 对沉睡块用 SAT 检查其下方接触面——
+  // 接触法线（从 b 指向支撑物 o）的向下分量 > 0.7（即支撑面法线向上）且接触深度足够，
+  // 才判定为有支撑。屋顶斜木等旋转块通过 SAT 端点接触正确判支撑。
+  function hasSupport(b) {
+    if (b.bottom >= GROUND_Y - 3) return true; // 贴地
+    // 【改动1 性能】包围圆剪枝：o 只要整体位于 b 底部下方过多的位置，就不可能接触 b
+    var rb = b.r || Math.max(b.w, b.h) * 0.5;
+    var bBottom = b.y + rb;
+    for (var i = 0; i < bodies.length; i++) {
+      var o = bodies[i];
+      if (o === b || o.dead) continue;
+      // 粗过滤：o 的中心在 b 下方附近且水平距离不太远（减少 SAT 调用）
+      if (o.y < b.y) continue;
+      if (Math.abs(o.x - b.x) > 160) continue;
+      var ro = o.r || Math.max(o.w, o.h) * 0.5;
+      if (o.y - ro > bBottom + 2) continue; // o 整体在 b 下方过远 → 必不接触
+      var col = getCollision(b, o);
+      if (!col) continue;
+      // 法线从 b 指向 o；o 在 b 下方时 col.ny > 0（指向下）。
+      // 支撑面（o 的顶面）法线向上的条件等价于 col.ny > 0.7；
+      // 深度容差 -0.5：精确接触（深度 0）与微小间隙也算支撑
+      if (col.ny > 0.7 && col.depth > -0.5) return true;
+    }
+    return false;
+  }
+
+  // 是否与任意物体真实接触（SAT 判定，用于区分"被夹住/堆叠"与"悬空下落"）
+  function touchingAny(b) {
+    var rb = b.r || Math.max(b.w, b.h) * 0.5;
+    for (var i = 0; i < bodies.length; i++) {
+      var o = bodies[i];
+      if (o === b || o.dead) continue;
+      var ro = o.r || Math.max(o.w, o.h) * 0.5;
+      var dx = o.x - b.x, dy = o.y - b.y, rr = rb + ro + 1;
+      if (dx * dx + dy * dy > rr * rr) continue;   // 包围圆分离 → 不可能接触
+      if (getCollision(b, o)) return true;
+    }
+    return false;
+  }
+
+  function stepPhysics(dt) {
+    // —— 改 8：自适应子步 —— 按当前最大速度决定子步数（越慢越省 CPU，越快越稳）
+    var maxSpeed = 0;
+    for (var ai = 0; ai < bodies.length; ai++) {
+      var ab = bodies[ai];
+      if (!ab.awake || ab.isWall) continue;
+      var sp = Math.hypot(ab.vx, ab.vy);
+      if (sp > maxSpeed) maxSpeed = sp;
+    }
+    var minSub = isMobile ? 3 : 4;
+    var sub;
+    if (maxSpeed <= 0) {
+      sub = 1;                                            // 无运动物体：单步走完
+    } else {
+      var needed = Math.ceil(maxSpeed * dt / 10);         // 每个子步位移不超过 10px
+      sub = Math.max(minSub, Math.min(8, needed));
+    }
+    var h = dt / sub;
+    for (var s = 0; s < sub; s++) {
+      bodies.forEach(function (b) {
+        if (!b.awake || b.isWall) return; // 墙不受重力/积分
+        b.vy += GRAVITY * h;
+        b.x += b.vx * h;
+        b.y += b.vy * h;
+        b.rot += b.vrot * h;
+      });
+      // 碰撞解算（先解算物体间约束，再处理地面，使触地物体的速度在子步末尾归零，
+      // 下一子步即可通过冲量把堆叠链上的速度逐层消除，避免整链"同步蠕动"）
+      for (var i = 0; i < bodies.length; i++) {
+        var A = bodies[i];
+        var rA = A.r || Math.max(A.w, A.h) * 0.5;
+        for (var j = i + 1; j < bodies.length; j++) {
+          var B = bodies[j];
+          if (!A.awake && !B.awake) continue;          // 双睡：无需检测
+          var rB = B.r || Math.max(B.w, B.h) * 0.5;
+          var ddx = A.x - B.x, ddy = A.y - B.y;
+          var rr = rA + rB + 2;
+          if (ddx * ddx + ddy * ddy > rr * rr) continue; // 包围圆分离 → 必然不相交
+          resolveCollision(A, B);
+        }
+      }
+      bodies.forEach(groundCollide);
+    }
+    // —— 改 5：阻尼查表（材质 linDamp / angDamp；deco 用 MATERIALS.deco.angDamp=0.90）——
+    bodies.forEach(function (b) {
+      if (!b.awake || b.isWall) return;
+      var m = matOf(b);
+      b.vx *= (m ? m.linDamp : DEFAULT_LIN_DAMP);
+      b.vrot *= (m ? m.angDamp : DEFAULT_ANG_DAMP);
+      if (b.vrot > 20) b.vrot = 20;         // 角速度上限 20 rad/s，保证 SAT 碰撞稳定
+      else if (b.vrot < -20) b.vrot = -20;
+      if (Math.abs(b.vx) < 8 && Math.abs(b.vy) < 8) { b.vx = 0; b.vy = 0; }
+    });
+    // 支撑检测：用接触法线法判定沉睡块的支撑状态，失去支撑即唤醒坠落
+    // （下层破碎后，上层块自动被唤醒 → 连锁倒塌）
+    // 【改动1 性能】降频到每 3 帧一次；破坏事件（smash/爆炸）置 supportDirty 强制立即检测，
+    // 因此连锁倒塌仍是即时的，只是纯静止场景的判断频率降低，大幅节省 5 塔大关卡的 CPU
+    supportTick++;
+    if (supportTick % 3 === 0 || supportDirty) {
+      var forced = supportDirty;      // 破坏事件：强制重新判定（保证连锁倒塌即时）
+      supportDirty = false;
+      bodies.forEach(function (b) {
+        if (b.awake || b.dead) return;
+        if (b.type === 'block' || b.type === 'pig') {
+          if (!hasSupport(b)) {
+            // 睡眠期间位置未变（被夹住/卡在废墟里）→ 不重复唤醒，避免反复微动抽搐；
+            // 破坏事件（forced）则强制唤醒，连锁倒塌不受影响
+            var stayed = (b.sleepX !== undefined &&
+                          Math.abs(b.x - b.sleepX) < 3 && Math.abs(b.y - b.sleepY) < 3);
+            if (forced || !stayed) {
+              b.awake = true;   // 不再人为加 vy（原 +40 会让被夹物体速度跳高、无法入睡）
+            }
+          }
+        }
+      });
+    }
+    // 休眠：速度趋近于零且受支撑的物体入睡（塔更稳定，不因微小扰动抖动）
+    // 注意：鸟不休眠——主循环需要检测它停下以结算回合
+    // 两种入睡途径：
+    // 1) 正常：低速度且有支撑（hasSupport）
+    // 2) 强制：连续接近静止（idleFrames/stillFrames）——解决物体被卡在结构缝隙中
+    //    （位置校正抵消重力 + 碰撞施加角速度）导致的"原地打转不停"
+    bodies.forEach(function (b) {
+      if (!b.awake || b.dead) return;
+      if (b.type === 'bird') return;
+      // 位置稳定性：位置几乎不变（原地打转/被夹住/微弹跳）→ 累计，作为入睡兜底
+      if (b.lastX !== undefined) {
+        if (Math.abs(b.x - b.lastX) < 3 && Math.abs(b.y - b.lastY) < 3) {
+          b.stillFrames = (b.stillFrames || 0) + 1;
+        } else {
+          b.stillFrames = 0;
+        }
+      }
+      b.lastX = b.x; b.lastY = b.y;
+      // —— 低速 + 与其他物体接触（堆叠/被夹住）→ 速度持续耗散，
+      //    抑制"整链同步蠕动"造成的 vy 无限累积（木块抖动/抽搐的根因）；
+      //    悬空下落的物体（vy 快速增大或无接触）不受影响，仍正常坠落 ——
+      if (Math.abs(b.vy) < 40 && Math.abs(b.vx) < 40 && touchingAny(b)) {
+        b.vx *= 0.7; b.vy *= 0.7; b.vrot *= 0.8;
+      }
+      // 折算速度：线速度 + 角速度折算（角速度影响视觉"打转"，权重 4）
+      // —— 改 8：休眠加速（阈值 20→25，入睡阈值 90→60，低速度入睡条件放宽）——
+      var speed = Math.abs(b.vx) + Math.abs(b.vy) + Math.abs(b.vrot) * 4;
+      if (speed < 25) {
+        b.idleFrames = (b.idleFrames || 0) + 1;
+      } else {
+        b.idleFrames = 0;
+      }
+      if (b.stillFrames > 60 || b.idleFrames > 60 ||
+          (Math.abs(b.vx) < 12 && Math.abs(b.vy) < 12 && Math.abs(b.vrot) < 1.5 && hasSupport(b))) {
+        b.awake = false;
+        b.vx = 0; b.vy = 0; b.vrot = 0;
+        b.idleFrames = 0;
+        b.stillFrames = 0;
+        b.sleepX = b.x; b.sleepY = b.y;   // 记录入睡位置：位置未变则不再被支撑检测反复唤醒
+        b.lastX = undefined; b.lastY = undefined;
+      }
+    });
+    // 越界清理（【改动1】随世界宽度扩展，保险条件放宽）
+    bodies.forEach(function (b) {
+      if (b.isWall) return;
+      if (b.x < -500 || b.x > WORLD_W + 500 || b.y > H + 400) {
+        if (b.type === 'bird') b.dead = true;
+        else if (b.type === 'pig' && !b.dead) killPig(b);
+      }
+    });
+    bodies = bodies.filter(function (b) { return !b.dead; });
+  }
+
+  // ==================== 技能 ====================
+  function activatePower(bird) {
+    if (!bird || bird.dead || bird.powerUsed) return;
+    bird.powerUsed = true;
+    if (bird.birdType === 'yellow') {
+      var ang = Math.atan2(bird.vy, bird.vx);
+      var sp = Math.max(900, Math.hypot(bird.vx, bird.vy) + 550);
+      bird.vx = Math.cos(ang) * sp;
+      bird.vy = Math.sin(ang) * sp;
+      addParticles(bird.x, bird.y, 12, '#f1c40f');
+    } else if (bird.birdType === 'black') {
+      // —— v3：困难模式黑鸟爆炸半径 180，其余 150 ——
+      // 【改动3】第 80 关起（究极难）：爆炸半径减半
+      var blastR = difficulty === 'hard' ? 180 : 150;
+      if (isUltraLevel()) blastR *= 0.5;
+      explode(bird.x, bird.y, blastR);
+      bird.dead = true;
+    }
+  }
+
+  function explode(x, y, radius) {
+    supportDirty = true; // 【改动1 性能】爆炸后强制立即重算支撑
+    // —— v4：移动端震屏减半 + 爆炸粒子 46→28（性能）——
+    shakeT = isMobile ? 0.15 : 0.3;
+    addParticles(x, y, isMobile ? 28 : 46, null);
+    bodies.forEach(function (b) {
+      if (b.dead) return;
+      var d = Math.hypot(b.x - x, b.y - y);
+      if (d < radius) {
+        b.awake = true;
+        var k = 1 - d / radius;
+        var ang = Math.atan2(b.y - y, b.x - x);
+        var force = k * 1500;
+        b.vx += Math.cos(ang) * force;
+        b.vy += Math.sin(ang) * force - 200;
+        b.vrot += (Math.random() - 0.5) * 12 * k;
+        if (b.type === 'pig') damagePig(b, 99); // 爆炸秒杀
+      }
+    });
+  }
+
+  // ==================== 计分与胜负 ====================
+  function updateScore() {
+    scoreEl.textContent = String(Math.floor(score));
+  }
+
+  function addFloatText(x, y, txt) {
+    floatTexts.push({ x: x, y: y, txt: txt, t: 0 });
+  }
+
+  // 猪受到伤害：按血量扣减，血尽才死（头顶有血条）
+  function damagePig(pig, dmg) {
+    if (pig.dead) return;
+    pig.hp -= dmg;
+    addFloatText(pig.x, pig.y - 68, '-' + dmg);
+    if (pig.hp <= 0) {
+      killPig(pig);
+    } else {
+      // 受击反应：惊醒并轻微弹开
+      pig.awake = true;
+      pig.vx += (Math.random() - 0.5) * 120;
+      pig.vrot += (Math.random() - 0.5) * 6;
+    }
+  }
+
+  function killPig(pig) {
+    if (pig.dead) return;
+    pig.dead = true;
+    score += 5000;
+    addFloatText(pig.x, pig.y - 40, '+5000');
+    addParticles(pig.x, pig.y, 16, '#7cb342');
+    updateScore();
+    // 震醒周围方块
+    bodies.forEach(function (b) {
+      if (b.type === 'block' && !b.awake && Math.hypot(b.x - pig.x, b.y - pig.y) < 90) {
+        b.awake = true;
+      }
+    });
+  }
+
+  function checkWin() {
+    var alive = pigs.some(function (p) { return !p.dead; });
+    return alive ? null : 'win';
+  }
+
+  function settleCurrentBird() {
+    bodies = bodies.filter(function (b) { return b !== currentBird; });
+    currentBird = null;
+    if (checkWin() === 'win') { endGame('win'); return; }
+    spawnNextBird();
+    gameState = 'ready';
+    // 不再立即判输：由 update 在"无鸟可发射且结构完全静止"后判定，
+    // 避免塔还在倒塌时就被判失败
+  }
+
+  function endGame(result) {
+    if (gameState === 'over') return; // 幂等：只结算一次
+    gameState = 'over';
+    lastResult = result;
+    overlay.classList.add('show');
+    skipBtn.style.display = 'inline-block'; // 结算时可跳过当前关
+    if (result === 'win') {
+      if (currentLevel < TOTAL_LEVELS - 1) {
+        // 【改动3】100 关制：途中过关（第 80 关起提示究极难）
+        overlayTitle.textContent = isUltraLevel() ? '🎉 究极难关卡通过！' : '🎉 过关！';
+        overlaySub.textContent = '得分: ' + Math.floor(score) +
+          (currentLevel + 1 === 79 ? '  |  自本关起进入究极难' : '');
+        restartBtn.textContent = '下一关 ▶';
+      } else {
+        overlayTitle.textContent = '🏆 全部 100 关通关！';
+        overlaySub.textContent = '你消灭了所有绿猪！最终得分: ' + Math.floor(score);
+        restartBtn.textContent = '再玩一次';
+      }
+    } else {
+      overlayTitle.textContent = '😢 挑战失败';
+      overlaySub.textContent = '小鸟用完了，还有绿猪没消灭。得分: ' + Math.floor(score);
+      restartBtn.textContent = '重试 ↻';
+    }
+  }
+
+  // ==================== 粒子与飘字 ====================
+  function addParticles(x, y, n, color) {
+    // —— v4：粒子总数上限 120，超出移除最早生成的（移动端性能保护）——
+    for (var i = 0; i < n; i++) {
+      var a = Math.random() * Math.PI * 2;
+      var sp = 150 + Math.random() * 550;
+      particles.push({
+        x: x, y: y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - 80,
+        t: 0,
+        life: 0.5 + Math.random() * 0.5,
+        size: 2.5 + Math.random() * 4,
+        color: color || ['#ff6600', '#ffcc00', '#ff3300', '#ff9900', '#ffffff'][i % 5]
+      });
+    }
+    if (particles.length > 120) {
+      particles.splice(0, particles.length - 120);
+    }
+  }
+
+  function updateFx(dt) {
+    particles.forEach(function (p) {
+      p.t += dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 900 * dt;
+    });
+    particles = particles.filter(function (p) { return p.t < p.life; });
+
+    floatTexts.forEach(function (f) { f.t += dt; f.y -= 40 * dt; });
+    floatTexts = floatTexts.filter(function (f) { return f.t < 1.4; });
+
+    if (shakeT > 0) shakeT -= dt;
+  }
+
+  // ==================== 输入 ====================
+  function getMousePos(e) {
+    var rect = canvas.getBoundingClientRect();
+    var sx = W / rect.width, sy = H / rect.height;
+    var cx = (e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0] ? e.touches[0].clientX : 0));
+    var cy = (e.clientY !== undefined ? e.clientY : (e.touches && e.touches[0] ? e.touches[0].clientY : 0));
+    return {
+      // 【改动1】视口坐标 → 世界坐标（摄像机偏移）
+      // 【功能4】再叠加缩放换算：world = (viewport - 中心)/zoom + 中心 (+ cameraX)
+      x: ((cx - rect.left) * sx - W / 2) / zoom + W / 2 + cameraX,
+      y: ((cy - rect.top) * sy - H / 2) / zoom + H / 2
+    };
+  }
+
+  // ═══════════ v7：视角平移 + 发射拖拽 冲突判定 ═══════════
+  // 优先级：pointerdown 命中小鸟 → 发射拖拽；否则先进入 pending，位移 > PAN_SLOP
+  // 才升级为平移；未超过阈值且时长短 → 视为点击（保留飞行中点击放技能）。
+  // 屏幕坐标版本（平移用）与 getMousePos 的视口部分一致，不受 camera/zoom 影响。
+  function getScreenPos(e) {
+    var rect = canvas.getBoundingClientRect();
+    var rx = rect.width || 1, ry = rect.height || 1;
+    var cx = clientXOf(e), cy = clientYOf(e);
+    return { x: (cx - rect.left) * (W / rx), y: (cy - rect.top) * (H / ry) };
+  }
+  function clientXOf(e) {
+    if (typeof e.clientX === 'number') return e.clientX;
+    if (e.touches && e.touches[0]) return e.touches[0].clientX;
+    if (e.changedTouches && e.changedTouches[0]) return e.changedTouches[0].clientX;
+    return 0;
+  }
+  function clientYOf(e) {
+    if (typeof e.clientY === 'number') return e.clientY;
+    if (e.touches && e.touches[0]) return e.touches[0].clientY;
+    if (e.changedTouches && e.changedTouches[0]) return e.changedTouches[0].clientY;
+    return 0;
+  }
+
+  // 小鸟命中热区：触摸端更宽松（手指粗），鼠标端适中；并叠加当前缩放
+  function birdHitRadius() {
+    var base = (isMobile || isTouchDevice()) ? 150 : 90;
+    return base / Math.max(0.5, zoom);
+  }
+
+  // 统一的“按下”处理
+  function onDown(e) {
+    // 竖屏遮罩显示期间暂停游戏输入
+    if (rotateMaskVisible()) return;
+    if (e && e.preventDefault) e.preventDefault();
+    // 已有手势进行中（多指）→ 忽略后续指针
+    if (gestureMode !== null) return;
+    if (e && e.pointerId !== undefined && gestureId !== null) return;
+
+    var sp = getScreenPos(e);
+    gestureStart.x = sp.x;
+    gestureStart.y = sp.y;
+    gestureStartCam = cameraX;
+    panMoved = 0;
+    gestureDuration = Date.now() / 1000;
+    gestureWasTap = false;
+    if (e && e.pointerId !== undefined) gestureId = e.pointerId;
+
+    // ① 命中小鸟（且当前可发射）→ 发射拖拽，判定优先
+    if (gameState === 'ready' && currentBird && currentBird.static) {
+      var wp = getMousePos(e);
+      if (Math.hypot(wp.x - currentBird.x, wp.y - currentBird.y) < birdHitRadius()) {
+        gestureMode = 'bird';
+        dragging = true;
+        dragStart = { x: currentBird.x, y: currentBird.y };
+        // —— v4：拉弓微震动反馈（Android 支持 navigator.vibrate，iOS 自动忽略）——
+        vibrate(10);
+        return;
+      }
+    }
+    // ② 否则进入“待定”：可能是平移视角，也可能是点击放技能
+    gestureMode = 'pending';
+  }
+
+  // 平移视角：直接跟手、无惯性（cameraX 按位移反向量平移，考虑缩放）
+  function panBy(dxScreen, dyScreen) {
+    var visW = W / zoom;
+    camShift = (gestureStartCam - dxScreen / zoom) - (WORLD_W - visW) / 2;
+    clampCamera();
+  }
+
+  function onMove(e) {
+    // 三种模式都需要继续接收 move（pan 在 pending 升级后仍需持续跟手）
+    if (gestureMode !== 'bird' && gestureMode !== 'pending' && gestureMode !== 'pan') return;
+    if (e && e.pointerId !== undefined && gestureId !== null && e.pointerId !== gestureId) return;
+    if (e && e.preventDefault) e.preventDefault();
+    var sp = getScreenPos(e);
+    var dx = sp.x - gestureStart.x;
+    var dy = sp.y - gestureStart.y;
+    var moved = Math.hypot(dx, dy);
+    if (moved > panMoved) panMoved = moved;
+
+    if (gestureMode === 'pending') {
+      if (moved <= PAN_SLOP) return;      // 未超过阈值：继续待定，不改变视角
+      gestureMode = 'pan';                // 超过阈值 → 判定为平移
+      panning = true;
+      canvas.classList.add('panning');
+      suppressClick = true;               // 本次手势不再触发技能
+    }
+    if (gestureMode === 'pan') {
+      panBy(dx, dy);
+      manualCameraTimer = 2;              // 平移期间锁定自动跟随
+      return;
+    }
+    // gestureMode === 'bird'：保持原有发射拖拽手感
+    if (!dragging || !currentBird) return;
+    var p = getMousePos(e);
+    var wx = p.x - dragStart.x;
+    var wy = p.y - dragStart.y;
+    if (wx > 0) wx = 0; // 只能向后（左）拉
+    var dist = Math.hypot(wx, wy);
+    if (dist > MAX_PULL) {
+      wx = wx / dist * MAX_PULL;
+      wy = wy / dist * MAX_PULL;
+    }
+    currentBird.x = dragStart.x + wx;
+    currentBird.y = dragStart.y + wy;
+  }
+
+  // 统一的“抬起/取消”处理
+  function onUp(e, cancelled) {
+    if (gestureMode === null) return;
+    if (e && e.pointerId !== undefined && gestureId !== null && e.pointerId !== gestureId) return;
+    if (e && e.preventDefault) e.preventDefault();
+
+    var mode = gestureMode;
+    gestureMode = null;
+    gestureId = null;
+    gestureDuration = Date.now() / 1000 - gestureDuration;
+
+    if (mode === 'bird') {
+      // —— 原有发射逻辑，完全保持 ——
+      dragging = false;
+      suppressClick = true; // 吞掉发射松手触发的 click，避免立刻放技能
+      if (!currentBird) return;
+      if (cancelled) { currentBird.x = dragStart.x; currentBird.y = dragStart.y; return; }
+      var dx = dragStart.x - currentBird.x;
+      var dy = dragStart.y - currentBird.y;
+      var pull = Math.hypot(dx, dy);
+      if (pull < 10) {
+        currentBird.x = dragStart.x;
+        currentBird.y = dragStart.y;
+        return;
+      }
+      // 【改动3】第 80 关起（究极难）：鸟初速略降 ×0.85
+      var speedScale = isUltraLevel() ? 0.85 : 1;
+      currentBird.static = false;
+      currentBird.awake = true;
+      currentBird.vx = dx * POWER * speedScale;
+      currentBird.vy = dy * POWER * speedScale;
+      gameState = 'flying';
+      vibrate(20);          // —— v4：发射微震动反馈 ——
+      return;
+    }
+
+    // pending / pan 结束
+    if (panning) {
+      panning = false;
+      canvas.classList.remove('panning');
+      manualCameraTimer = 1.6;  // 平移结束后短暂锁定自动跟随，避免视角被立刻拉回
+    }
+    // 位移 < 10px 且按住时间短 → 视为点击：保留"飞行中点击屏幕触发技能"
+    if (mode === 'pending' && !cancelled && panMoved < PAN_SLOP && gestureDuration <= GESTURE_TAP_SEC) {
+      gestureWasTap = true;
+      suppressClick = true;     // 由本次点击自行处理，避免随后合成的 click 再来一次
+      triggerPowerOnFlyingBird();
+    }
+  }
+
+  // 振动反馈：Android/部分安卓浏览器支持，iOS 自动忽略
+  function vibrate(ms) {
+    if (!isMobile || typeof navigator === 'undefined' || !navigator.vibrate) return;
+    try { navigator.vibrate(ms); } catch (err) { /* 忽略 */ }
+  }
+
+  // 【改动3】当前是否处于"究极难"关卡（第 80 关及以后，idx >= 79）
+  function isUltraLevel() { return currentLevel >= 79; }
+
+  // —— v7：优先使用 Pointer Events（统一鼠标/触摸/触控笔），不支持时回退 mouse+touch ——
+  var hasPointerEvents = (typeof window !== 'undefined' && 'PointerEvent' in window);
+  function isTouchDevice() {
+    return (typeof window !== 'undefined') &&
+      ('ontouchstart' in window || (navigator && navigator.maxTouchPoints > 0));
+  }
+  // 统一“按下”入口：鼠标只响应左键（触摸/触控笔按钮恒为 0）
+  function onDownEntry(e) {
+    if (e && e.pointerType === 'mouse' && typeof e.button === 'number' && e.button !== 0) {
+      gestureMode = null; gestureId = null; return;
+    }
+    if (e && typeof e.button === 'number' && e.button !== 0 && e.button !== undefined &&
+        !e.touches && e.pointerType === undefined) {
+      return;   // 回退路径下的非左键 mousedown
+    }
+    onDown(e);
+  }
+  var boundDown = function (e) { onDownEntry(e); };
+  var boundMove = function (e) { onMove(e); };
+  var boundUp = function (e) { onUp(e, false); };
+  var boundCancel = function (e) { onUp(e, true); };
+  if (hasPointerEvents) {
+    canvas.addEventListener('pointerdown', boundDown, { passive: false });
+    canvas.addEventListener('pointermove', boundMove, { passive: false });
+    window.addEventListener('pointerup', boundUp);
+    window.addEventListener('pointercancel', boundCancel);
+    // 指针滑出画布后仍能收到 move，平移不会中途丢失追踪
+    window.addEventListener('pointermove', boundMove, { passive: false });
+  } else {
+    canvas.addEventListener('mousedown', boundDown);
+    canvas.addEventListener('mousemove', boundMove);
+    window.addEventListener('mouseup', boundUp);
+    canvas.addEventListener('touchstart', boundDown, { passive: false });
+    canvas.addEventListener('touchmove', boundMove, { passive: false });
+    window.addEventListener('touchend', boundUp, { passive: false });
+    window.addEventListener('touchcancel', boundCancel, { passive: false });
+  }
+
+  canvas.addEventListener('click', function (e) {
+    // 发射松手 / 平移 / 已由手势判定的点击，都吞掉合成 click
+    if (suppressClick) { suppressClick = false; return; }
+    if (gestureWasTap) { gestureWasTap = false; return; }
+    if (rotateMaskVisible()) return;   // 遮罩期间暂停输入
+    triggerPowerOnFlyingBird();
+  });
+
+  window.addEventListener('keydown', function (e) {
+    if (rotateMaskVisible()) return;   // 遮罩期间暂停键盘输入
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      if (e.repeat) return;
+      triggerPowerOnFlyingBird();
+      return;
+    }
+    // 【功能2】← → 手动移动摄像机（辅助操作；鼠标/手指拖动平移为主）
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (gameState === 'flying') return;
+      // 注意：clampCamera 由 camShift 推导 cameraX，因此必须改 camShift 才不会被覆盖
+      camShift += (e.key === 'ArrowRight' ? 30 : -30);
+      clampCamera();
+      manualCameraTimer = 2; // 锁定自动跟随 2 秒
+      return;
+    }
+    // 【功能4】↑ ↓ 缩放画面（0.5 ~ 2.0）
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      // v7：缩放会改变可见世界宽度，按“相对位置”保留当前视角（不会突然跳到边界）
+      var limOld = (WORLD_W - W / zoom) / 2;
+      var rel = limOld > 0 ? Math.max(-1, Math.min(1, camShift / limOld)) : 0;
+      zoom += (e.key === 'ArrowUp' ? 0.1 : -0.1);
+      zoom = Math.max(0.5, Math.min(2.0, Math.round(zoom * 10) / 10));
+      var limNew = (WORLD_W - W / zoom) / 2;
+      camShift = rel * limNew;          // 同样必须改 camShift（clampCamera 会由它推导 cameraX）
+      clampCamera();
+      // 缩放时同样锁定自动跟随，避免视角立刻回弹
+      manualCameraTimer = Math.max(manualCameraTimer, 1.6);
+      return;
+    }
+  });
+
+  function triggerPowerOnFlyingBird() {
+    var target = null;
+    if (currentBird && currentBird.awake && !currentBird.dead) target = currentBird;
+    if (!target) {
+      target = bodies.filter(function (b) {
+        return b.type === 'bird' && b.awake && !b.dead && b !== currentBird;
+      })[0];
+    }
+    if (target) activatePower(target);
+  }
+
+  restartBtn.addEventListener('click', function () {
+    if (gameState === 'menu') {
+      loadLevel(0);
+    } else if (lastResult === 'win') {
+      // 【修 bug】第 100 关通关后不再越界：回到第 1 关
+      if (currentLevel < TOTAL_LEVELS - 1) loadLevel(currentLevel + 1);
+      else loadLevel(0);
+    } else {
+      loadLevel(currentLevel); // 重试当前关（随机关卡用同一种子，布局不变）
+    }
+  });
+
+  // 跳过当前关：直接进入下一关（适用于胜利或失败后的结算界面）
+  skipBtn.addEventListener('click', function () {
+    // 【修 bug】最后一关不再越界（原会加载超出范围的第 101 关）
+    if (gameState === 'over' && currentLevel < TOTAL_LEVELS - 1) {
+      loadLevel(currentLevel + 1);
+    }
+  });
+
+  // —— v3：难度选择 ——
+  function setDifficulty(d) {
+    difficulty = d;
+    var ids = ['diff-easy', 'diff-normal', 'diff-hard'];
+    for (var di = 0; di < ids.length; di++) {
+      var btn = document.getElementById(ids[di]);
+      if (!btn) continue;
+      if (ids[di] === 'diff-' + d) btn.classList.add('selected');
+      else btn.classList.remove('selected');
+    }
+  }
+  document.getElementById('diff-easy').addEventListener('click', function () { setDifficulty('easy'); });
+  document.getElementById('diff-normal').addEventListener('click', function () { setDifficulty('normal'); });
+  document.getElementById('diff-hard').addEventListener('click', function () { setDifficulty('hard'); });
+
+  // —— v4：全屏按钮（兼容 requestFullscreen / webkitRequestFullscreen，iOS Safari 可用）——
+  document.getElementById('fullscreen-btn').addEventListener('click', function () {
+    var docEl = document.documentElement;
+    if (!docEl) return;
+    var isFs = document.fullscreenElement || document.webkitFullscreenElement;
+    if (!isFs) {
+      if (docEl.requestFullscreen) {
+        docEl.requestFullscreen();
+      } else if (docEl.webkitRequestFullscreen) {
+        docEl.webkitRequestFullscreen(); // iOS Safari / 旧版 WebKit
+      }
+    } else {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+  });
+
+  // —— v5【改动2】：使用说明面板 ——
+  document.getElementById('help-btn').addEventListener('click', function () {
+    document.getElementById('help-panel').classList.add('show');
+  });
+  document.getElementById('help-close').addEventListener('click', function () {
+    document.getElementById('help-panel').classList.remove('show');
+  });
+  document.getElementById('help-panel').addEventListener('click', function (e) {
+    if (e.target && e.target.id === 'help-panel') {
+      document.getElementById('help-panel').classList.remove('show');
+    }
+  });
+
+  // —— v6【功能1】：关卡总览面板 ——
+  // 每次打开时重建 1~100 的网格（每行 10 个，当前关卡高亮），点击关卡直接载入
+  function buildLevelGrid() {
+    var grid = document.getElementById('level-grid');
+    if (!grid) return;
+    var html = '';
+    for (var i = 0; i < TOTAL_LEVELS; i++) {
+      var cls = 'level-cell';
+      if (i === currentLevel) cls += ' current';
+      if (i >= ULTRA_DIFF + 4) cls += ' ultra';   // 第 80 关起标记究极难
+      html += '<button class="' + cls + '" data-idx="' + i + '">' + (i + 1) + '</button>';
+    }
+    grid.innerHTML = html;
+  }
+  document.getElementById('level-btn').addEventListener('click', function () {
+    buildLevelGrid();
+    document.getElementById('level-panel').classList.add('show');
+  });
+  document.getElementById('level-close').addEventListener('click', function () {
+    document.getElementById('level-panel').classList.remove('show');
+  });
+  // 点击遮罩关闭
+  document.getElementById('level-panel').addEventListener('click', function (e) {
+    if (e.target && e.target.id === 'level-panel') {
+      document.getElementById('level-panel').classList.remove('show');
+    }
+  });
+  // 事件委托：点击网格中的关卡按钮 → 载入该关并关闭面板
+  document.getElementById('level-grid').addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || typeof t.getAttribute !== 'function') return;
+    var idxStr = t.getAttribute('data-idx');
+    if (idxStr === null || idxStr === undefined) return;
+    var idx = parseInt(idxStr, 10);
+    if (isNaN(idx) || idx < 0 || idx >= TOTAL_LEVELS) return;
+    document.getElementById('level-panel').classList.remove('show');
+    loadLevel(idx);
+  });
+
+  // —— v4：竖屏提示关闭 ——
+  document.getElementById('rotate-close').addEventListener('click', function () {
+    rotateDismissed = true;
+    var rotateEl = document.getElementById('rotate-hint');
+    if (rotateEl) rotateEl.classList.remove('show');
+  });
+
+  // ==================== 绘制 ====================
+  // —— 视觉辅助工具（仅绘制层，不影响任何机制）——
+  function lighten(hex, amt) {
+    var n = parseInt(hex.slice(1), 16);
+    var r = Math.min(255, (n >> 16) + amt);
+    var g = Math.min(255, ((n >> 8) & 0xff) + amt);
+    var b = Math.min(255, (n & 0xff) + amt);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+
+  function roundRect(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawBush(x, y) {
+    ctx.fillStyle = 'rgba(70,130,60,0.9)';
+    ctx.beginPath();
+    ctx.arc(x, y - 8, 14, 0, Math.PI * 2);
+    ctx.arc(x + 15, y - 6, 12, 0, Math.PI * 2);
+    ctx.arc(x - 13, y - 6, 11, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(150,200,95,0.6)';
+    ctx.beginPath();
+    ctx.arc(x + 2, y - 13, 8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawTree(x, y, s) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(s, s);
+    ctx.fillStyle = '#6d4c2a';
+    ctx.fillRect(-4, -32, 8, 36);
+    ctx.fillStyle = '#3e7a35';
+    ctx.beginPath();
+    ctx.arc(0, -42, 19, 0, Math.PI * 2);
+    ctx.arc(-15, -32, 14, 0, Math.PI * 2);
+    ctx.arc(15, -32, 14, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.beginPath();
+    ctx.arc(-6, -48, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 【改动1】把背景预渲染到离屏画布（WORLD_W 全宽），避免右侧空白且每帧只 1 次 drawImage
+  function buildBackground() {
+    if (typeof document.createElement !== 'function') return; // 环境不支持则回退实时绘制
+    var off = document.createElement('canvas');
+    if (!off || typeof off.getContext !== 'function') return;
+    off.width = WORLD_W;
+    off.height = H;
+    var offCtx = off.getContext('2d');
+    if (!offCtx) return;
+    var real = ctx;      // 临时切换全局 ctx，复用既有 drawBackground 逻辑（无需改动其内部）
+    ctx = offCtx;
+    drawBackground();
+    ctx = real;
+    bgCanvas = off;
+  }
+
+  function drawBackground() {
+    // 天空：三层渐变（深蓝 → 天蓝 → 暖色地平线）——【改动1】铺满整个 WORLD_W
+    var sky = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+    sky.addColorStop(0, '#4a90d9');
+    sky.addColorStop(0.45, '#87ceeb');
+    sky.addColorStop(0.8, '#cdeffd');
+    sky.addColorStop(1, '#f6e7c9');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, WORLD_W, GROUND_Y);
+
+    // 太阳（径向光晕 + 核心）——【改动1】放在世界中央偏左，视野可见
+    var sunX = WORLD_W * 0.42;
+    var sun = ctx.createRadialGradient(sunX, 90, 8, sunX, 90, 95);
+    sun.addColorStop(0, 'rgba(255,244,170,1)');
+    sun.addColorStop(0.3, 'rgba(255,224,110,0.7)');
+    sun.addColorStop(1, 'rgba(255,224,110,0)');
+    ctx.fillStyle = sun;
+    ctx.beginPath();
+    ctx.arc(sunX, 90, 95, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff7cf';
+    ctx.beginPath();
+    ctx.arc(sunX, 90, 42, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffe98a';
+    ctx.beginPath();
+    ctx.arc(sunX, 90, 35, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 远山（两层：蓝灰远山 + 深绿近山）——【改动1】沿 WORLD_W 平铺
+    for (var tile = 0; tile < WORLD_W; tile += W) {
+      ctx.fillStyle = 'rgba(130,165,185,0.45)';
+      ctx.beginPath();
+      ctx.moveTo(tile, GROUND_Y);
+      ctx.quadraticCurveTo(tile + 240, 300, tile + 560, GROUND_Y);
+      ctx.quadraticCurveTo(tile + 700, 345, tile + 900, GROUND_Y);
+      ctx.quadraticCurveTo(tile + 1100, 285, tile + 1280, GROUND_Y);
+      ctx.lineTo(tile + 1280, GROUND_Y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgba(96,140,110,0.6)';
+      ctx.beginPath();
+      ctx.moveTo(tile, GROUND_Y);
+      ctx.quadraticCurveTo(tile + 380, 330, tile + 700, GROUND_Y);
+      ctx.quadraticCurveTo(tile + 1000, 355, tile + 1280, GROUND_Y);
+      ctx.lineTo(tile + 1280, GROUND_Y);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // 远景树 + 云：按 WORLD_W 分布
+    drawTree(150, GROUND_Y, 0.9);
+    drawTree(520, GROUND_Y, 0.7);
+    drawTree(1180, GROUND_Y, 0.8);
+    drawTree(1480, GROUND_Y, 0.85);
+    drawTree(1850, GROUND_Y, 0.7);
+    drawTree(2260, GROUND_Y, 0.95);
+
+    drawCloud(180, 110, 1);
+    drawCloud(680, 70, 0.8);
+    drawCloud(1010, 165, 0.9);
+    drawCloud(430, 200, 0.6);
+    drawCloud(1420, 120, 0.95);
+    drawCloud(1900, 80, 0.75);
+    drawCloud(2280, 170, 0.9);
+    drawCloud(1650, 205, 0.6);
+
+    // 地面：草甸渐变——【改动1】铺满 WORLD_W
+    var grass = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+    grass.addColorStop(0, '#8bc34a');
+    grass.addColorStop(0.25, '#7cb342');
+    grass.addColorStop(1, '#5c8a33');
+    ctx.fillStyle = grass;
+    ctx.fillRect(0, GROUND_Y, WORLD_W, H - GROUND_Y);
+    // 地面边缘亮线
+    ctx.fillStyle = '#a5d65c';
+    ctx.fillRect(0, GROUND_Y, WORLD_W, 3);
+
+    // 草地纹理：草叶 + 小花 + 小石子（固定伪随机，不随帧变化）——【改动1】覆盖 WORLD_W
+    var grassCount = 90 * (WORLD_W / W);
+    for (var i = 0; i < grassCount; i++) {
+      var gx = (i * 47 + 7) % WORLD_W;
+      var gh = 7 + (i % 6) * 3;
+      ctx.strokeStyle = i % 3 === 0 ? '#558b2f' : '#66a03a';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(gx, GROUND_Y + 2);
+      ctx.quadraticCurveTo(gx - 3, GROUND_Y - gh * 0.6, gx - 2, GROUND_Y - gh);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(gx, GROUND_Y + 2);
+      ctx.quadraticCurveTo(gx + 4, GROUND_Y - gh * 0.4, gx + 3, GROUND_Y - gh * 0.7);
+      ctx.stroke();
+      if (i % 9 === 4) {
+        ctx.fillStyle = i % 2 ? '#ffeb9d' : '#fff0f0';
+        ctx.beginPath();
+        ctx.arc(gx + 6, GROUND_Y - 6, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffb74d';
+        ctx.beginPath();
+        ctx.arc(gx + 6, GROUND_Y - 6, 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (i % 13 === 7) {
+        ctx.fillStyle = 'rgba(120,100,80,0.5)';
+        ctx.beginPath();
+        ctx.ellipse(gx + 12, GROUND_Y + 4, 4, 2.5, 0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    // 弹弓旁灌木丛（起点区域）
+    drawBush(120, GROUND_Y);
+    drawBush(315, GROUND_Y + 5);
+    // 世界后半段的灌木点缀
+    drawBush(1450, GROUND_Y);
+    drawBush(1720, GROUND_Y + 5);
+    drawBush(2300, GROUND_Y);
+  }
+
+  function drawCloud(x, y, s) {
+    s = s || 1;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(s, s);
+    // 底部阴影
+    ctx.fillStyle = 'rgba(180,200,220,0.5)';
+    ctx.beginPath();
+    ctx.ellipse(0, 15, 62, 14, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // 云身
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.beginPath();
+    ctx.arc(0, 0, 26, 0, Math.PI * 2);
+    ctx.arc(32, -14, 22, 0, Math.PI * 2);
+    ctx.arc(62, -2, 26, 0, Math.PI * 2);
+    ctx.arc(30, 8, 24, 0, Math.PI * 2);
+    ctx.fill();
+    // 顶部高光
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(-5, -8, 17, 0, Math.PI * 2);
+    ctx.arc(27, -18, 14, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawSlingshot() {
+    ctx.save();
+    ctx.lineCap = 'round';
+    // 主体投影
+    ctx.strokeStyle = 'rgba(50,35,20,0.3)';
+    ctx.lineWidth = 17;
+    ctx.beginPath();
+    ctx.moveTo(SLING_X + 4, GROUND_Y);
+    ctx.lineTo(SLING_X + 4, SLING_Y + 24);
+    ctx.stroke();
+    // 主杆（渐变木色）
+    var grad = ctx.createLinearGradient(SLING_X - 8, 0, SLING_X + 8, 0);
+    grad.addColorStop(0, '#7a5326');
+    grad.addColorStop(0.5, '#9c6b35');
+    grad.addColorStop(1, '#6d4c2a');
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 13;
+    ctx.beginPath();
+    ctx.moveTo(SLING_X, GROUND_Y);
+    ctx.lineTo(SLING_X, SLING_Y + 22);
+    ctx.stroke();
+    // 木纹
+    ctx.strokeStyle = 'rgba(70,45,20,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(SLING_X - 3, GROUND_Y - 8);
+    ctx.lineTo(SLING_X - 3, SLING_Y + 18);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(SLING_X + 3, GROUND_Y - 5);
+    ctx.lineTo(SLING_X + 3, SLING_Y + 15);
+    ctx.stroke();
+    // 叉
+    ctx.strokeStyle = '#8a5f2e';
+    ctx.lineWidth = 9;
+    ctx.beginPath();
+    ctx.moveTo(SLING_X - 17, SLING_Y);
+    ctx.quadraticCurveTo(SLING_X - 27, SLING_Y + 12, SLING_X - 8, SLING_Y + 24);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(SLING_X + 17, SLING_Y);
+    ctx.quadraticCurveTo(SLING_X + 27, SLING_Y + 12, SLING_X + 8, SLING_Y + 24);
+    ctx.stroke();
+    // 叉的高光
+    ctx.strokeStyle = 'rgba(255,220,170,0.28)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(SLING_X - 19, SLING_Y + 1);
+    ctx.quadraticCurveTo(SLING_X - 24, SLING_Y + 8, SLING_X - 12, SLING_Y + 18);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(SLING_X + 19, SLING_Y + 1);
+    ctx.quadraticCurveTo(SLING_X + 24, SLING_Y + 8, SLING_X + 12, SLING_Y + 18);
+    ctx.stroke();
+    // 叉顶圆头 + 高光
+    ctx.fillStyle = '#a06b2c';
+    ctx.beginPath();
+    ctx.arc(SLING_X - 17, SLING_Y, 6, 0, Math.PI * 2);
+    ctx.arc(SLING_X + 17, SLING_Y, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,230,180,0.5)';
+    ctx.beginPath();
+    ctx.arc(SLING_X - 18, SLING_Y - 1.5, 2.2, 0, Math.PI * 2);
+    ctx.arc(SLING_X + 16, SLING_Y - 1.5, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawElastic() {
+    if (!currentBird || !currentBird.static) return;
+    var x = currentBird.x, y = currentBird.y;
+    ctx.save();
+    ctx.lineCap = 'round';
+    // 皮筋主体（深棕）
+    ctx.strokeStyle = '#4e342e';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(SLING_X - 17, SLING_Y);
+    ctx.quadraticCurveTo((SLING_X - 17 + x) / 2, (SLING_Y + y) / 2, x, y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(SLING_X + 17, SLING_Y);
+    ctx.quadraticCurveTo((SLING_X + 17 + x) / 2, (SLING_Y + y) / 2, x, y);
+    ctx.stroke();
+    // 皮筋高光
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(SLING_X - 17, SLING_Y - 1);
+    ctx.quadraticCurveTo((SLING_X - 17 + x) / 2, (SLING_Y + y) / 2 - 2, x, y - 1);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(SLING_X + 17, SLING_Y - 1);
+    ctx.quadraticCurveTo((SLING_X + 17 + x) / 2, (SLING_Y + y) / 2 - 2, x, y - 1);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawTrajectory() {
+    if (!dragging || !currentBird) return;
+    var dx = currentBird.x - dragStart.x;
+    var dy = currentBird.y - dragStart.y;
+    ctx.save();
+    var px = currentBird.x, py = currentBird.y;
+    var vx = -dx * POWER, vy = -dy * POWER;
+    // —— v4：移动端轨迹虚线加粗（手指粗，视线更清晰）——
+    var lw = isMobile ? 7 : 3.5;
+    ctx.setLineDash([6, 7]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    var ex = px, ey = py;
+    for (var i = 0; i < 30; i++) {
+      vy += GRAVITY * 0.016;
+      px += vx * 0.016;
+      py += vy * 0.016;
+      if (py > GROUND_Y) break;
+      ctx.lineTo(px, py);
+      ex = px; ey = py;
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // 落点标记
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = isMobile ? 3.5 : 2;
+    ctx.beginPath();
+    ctx.arc(ex, Math.min(ey, GROUND_Y - 4), isMobile ? 13 : 9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.beginPath();
+    ctx.arc(ex, Math.min(ey, GROUND_Y - 4), isMobile ? 6 : 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBird(b) {
+    if (b.dead) return;
+    var def = BIRD_DEFS[b.birdType] || BIRD_DEFS.red;
+    var r = def.r;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.rot);
+
+    // 身体（径向渐变：左上受光、右下背光）
+    var g = ctx.createRadialGradient(-r * 0.35, -r * 0.4, r * 0.15, 0, 0, r * 1.15);
+    g.addColorStop(0, lighten(def.body, 45));
+    g.addColorStop(0.55, def.body);
+    g.addColorStop(1, def.dark);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.22)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 肚皮（柔和高光渐变）
+    var bg = ctx.createRadialGradient(0, r * 0.55, r * 0.05, 0, r * 0.4, r * 0.7);
+    bg.addColorStop(0, '#fffdf4');
+    bg.addColorStop(1, def.belly);
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.ellipse(0, r * 0.4, r * 0.58, r * 0.42, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 尾羽（羽毛填充 + 亮边）
+    ctx.fillStyle = def.dark;
+    for (var i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.62, -r * 0.1 + i * r * 0.17);
+      ctx.quadraticCurveTo(-r * 1.42, -r * 0.26 + i * r * 0.32, -r * 1.28, -r * 0.52 + i * r * 0.28);
+      ctx.quadraticCurveTo(-r * 0.95, -r * 0.46 + i * r * 0.18, -r * 0.58, -r * 0.34 + i * r * 0.1);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.62, -r * 0.1);
+    ctx.quadraticCurveTo(-r * 1.42, -r * 0.26, -r * 1.28, -r * 0.52);
+    ctx.stroke();
+
+    // 眼睛（眼白 + 瞳孔 + 高光）
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(r * 0.28, -r * 0.32, r * 0.33, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#1a1a1a';
+    ctx.beginPath();
+    ctx.arc(r * 0.36, -r * 0.34, r * 0.15, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(r * 0.4, -r * 0.38, r * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 愤怒眉毛（黑鸟用白色粗眉）
+    ctx.strokeStyle = b.birdType === 'black' ? '#ffffff' : '#7f1d1d';
+    ctx.lineWidth = 4.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(r * 0.0, -r * 0.66);
+    ctx.lineTo(r * 0.64, -r * 0.5);
+    ctx.stroke();
+
+    // 嘴（渐变喙 + 中线）
+    var beak = ctx.createLinearGradient(0, 0, r, 0);
+    beak.addColorStop(0, '#ffa726');
+    beak.addColorStop(1, '#ef6c00');
+    ctx.fillStyle = beak;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.08, r * 0.02);
+    ctx.lineTo(r * 0.9, r * 0.0);
+    ctx.lineTo(r * 0.82, r * 0.12);
+    ctx.lineTo(r * 0.5, r * 0.28);
+    ctx.lineTo(0, r * 0.16);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(140,60,0,0.6)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.05, r * 0.1);
+    ctx.lineTo(r * 0.86, r * 0.06);
+    ctx.stroke();
+
+    // 头顶羽（带羽尖）
+    ctx.strokeStyle = def.dark;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.15, -r * 0.88);
+    ctx.quadraticCurveTo(r * 0.05, -r * 1.45, r * 0.35, -r * 1.1);
+    ctx.stroke();
+    ctx.fillStyle = def.body;
+    ctx.beginPath();
+    ctx.ellipse(r * 0.3, -r * 1.15, r * 0.16, r * 0.09, 0.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawPig(p) {
+    if (p.dead) return;
+    var r = p.r;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rot);
+
+    // 头顶血条（圆角 + 渐变，纯绘制美化）
+    var barW = r * 1.9, barH = 8, barY = -r - 18;
+    roundRect(-barW / 2, barY, barW, barH, 4);
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fill();
+    var ratio = Math.max(0, p.hp / p.maxHp);
+    if (ratio > 0) {
+      roundRect(-barW / 2 + 1, barY + 1, Math.max(2, (barW - 2) * ratio), barH - 2, 3);
+      var hg = ctx.createLinearGradient(0, barY, 0, barY + barH);
+      if (ratio > 0.5) { hg.addColorStop(0, '#81c784'); hg.addColorStop(1, '#4caf50'); }
+      else if (ratio > 0.25) { hg.addColorStop(0, '#ffb74d'); hg.addColorStop(1, '#f57c00'); }
+      else { hg.addColorStop(0, '#e57373'); hg.addColorStop(1, '#d32f2f'); }
+      ctx.fillStyle = hg;
+      ctx.fill();
+    }
+    roundRect(-barW / 2, barY, barW, barH, 4);
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 10px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.hp + '/' + p.maxHp, 0, barY - 3);
+
+    // 小脚
+    ctx.fillStyle = '#558b2f';
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.42, r * 0.86, r * 0.2, r * 0.12, 0, 0, Math.PI * 2);
+    ctx.ellipse(r * 0.42, r * 0.86, r * 0.2, r * 0.12, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 身体（径向渐变）
+    var g = ctx.createRadialGradient(-r * 0.3, -r * 0.4, r * 0.15, 0, 0, r * 1.2);
+    g.addColorStop(0, '#9ccc65');
+    g.addColorStop(0.6, '#7cb342');
+    g.addColorStop(1, '#558b2f');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 耳朵（外耳 + 粉色内耳）
+    ctx.fillStyle = '#7cb342';
+    ctx.strokeStyle = '#4a7729';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.72, -r * 0.55);
+    ctx.lineTo(-r * 0.98, -r * 1.05);
+    ctx.lineTo(-r * 0.32, -r * 0.82);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(r * 0.72, -r * 0.55);
+    ctx.lineTo(r * 0.98, -r * 1.05);
+    ctx.lineTo(r * 0.32, -r * 0.82);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,180,180,0.55)';
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.66, -r * 0.66);
+    ctx.lineTo(-r * 0.8, -r * 0.92);
+    ctx.lineTo(-r * 0.44, -r * 0.78);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(r * 0.66, -r * 0.66);
+    ctx.lineTo(r * 0.8, -r * 0.92);
+    ctx.lineTo(r * 0.44, -r * 0.78);
+    ctx.closePath();
+    ctx.fill();
+
+    // 头顶小卷毛
+    ctx.strokeStyle = '#558b2f';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(0, -r * 0.98, r * 0.1, Math.PI * 0.1, Math.PI * 1.4);
+    ctx.stroke();
+
+    // 眼睛（眼白 + 瞳孔 + 高光）
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(-r * 0.42, -r * 0.32, r * 0.25, 0, Math.PI * 2);
+    ctx.arc(r * 0.42, -r * 0.32, r * 0.25, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#1b5e20';
+    ctx.beginPath();
+    ctx.arc(-r * 0.38, -r * 0.34, r * 0.12, 0, Math.PI * 2);
+    ctx.arc(r * 0.46, -r * 0.34, r * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(-r * 0.34, -r * 0.38, r * 0.045, 0, Math.PI * 2);
+    ctx.arc(r * 0.5, -r * 0.38, r * 0.045, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 鼻子（渐变 + 鼻孔 + 鼻梁高光）
+    var ng = ctx.createLinearGradient(0, -r * 0.2, 0, r * 0.25);
+    ng.addColorStop(0, '#7cb342');
+    ng.addColorStop(1, '#558b2f');
+    ctx.fillStyle = ng;
+    ctx.beginPath();
+    ctx.ellipse(0, r * 0.02, r * 0.32, r * 0.24, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#3d7028';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = '#2e5a1e';
+    ctx.beginPath();
+    ctx.arc(-r * 0.12, r * 0.02, r * 0.06, 0, Math.PI * 2);
+    ctx.arc(r * 0.12, r * 0.02, r * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.beginPath();
+    ctx.ellipse(0, -r * 0.09, r * 0.12, r * 0.05, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 表情（纯绘制：血量低时紧张流汗；血量充足时微笑）
+    if (p.hp < p.maxHp * 0.4) {
+      ctx.fillStyle = 'rgba(120,190,255,0.85)';
+      ctx.beginPath();
+      ctx.arc(-r * 0.85, -r * 0.5, r * 0.09, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#33691e';
+      ctx.beginPath();
+      ctx.ellipse(0, r * 0.3, r * 0.09, r * 0.05, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(50,80,30,0.7)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, r * 0.12, r * 0.18, 0.15, Math.PI - 0.15);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function drawBlock(b) {
+    if (b.dead) return;
+    var wood = b.mat === 'wood';
+    var hw = b.w / 2, hh = b.h / 2;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.rot);
+
+    if (wood) {
+      // 木块：主体渐变（上亮下暗）
+      var g = ctx.createLinearGradient(0, -hh, 0, hh);
+      g.addColorStop(0, '#d9ae54');
+      g.addColorStop(0.5, '#c49a4a');
+      g.addColorStop(1, '#9c7430');
+      ctx.fillStyle = g;
+      ctx.fillRect(-hw, -hh, b.w, b.h);
+      // 木纹（顺长边的波浪条纹）
+      ctx.strokeStyle = 'rgba(120,80,30,0.4)';
+      ctx.lineWidth = 2;
+      var n = Math.max(2, Math.round((b.w >= b.h ? b.w : b.h) / 26));
+      for (var i = 0; i <= n; i++) {
+        ctx.beginPath();
+        if (b.w >= b.h) {
+          var mx = -hw + (b.w / n) * i;
+          ctx.moveTo(mx, -hh);
+          ctx.quadraticCurveTo(mx + 4, 0, mx, hh);
+        } else {
+          var my = -hh + (b.h / n) * i;
+          ctx.moveTo(-hw, my);
+          ctx.quadraticCurveTo(0, my + 4, hw, my);
+        }
+        ctx.stroke();
+      }
+      // 短边年轮
+      ctx.strokeStyle = 'rgba(150,100,40,0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, hh * 0.55, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, hh * 0.3, 0, Math.PI * 2);
+      ctx.stroke();
+    } else {
+      // 石块：主体渐变
+      var g2 = ctx.createLinearGradient(0, -hh, 0, hh);
+      g2.addColorStop(0, '#c7cfd8');
+      g2.addColorStop(0.5, '#aab2bd');
+      g2.addColorStop(1, '#87909c');
+      ctx.fillStyle = g2;
+      ctx.fillRect(-hw, -hh, b.w, b.h);
+      // 砖缝（横缝 + 错开竖缝）
+      ctx.strokeStyle = 'rgba(70,80,95,0.55)';
+      ctx.lineWidth = 2;
+      var rows = b.h > 60 ? 3 : 2;
+      for (var r = 1; r < rows; r++) {
+        var ry = -hh + (b.h / rows) * r;
+        ctx.beginPath();
+        ctx.moveTo(-hw, ry);
+        ctx.lineTo(hw, ry);
+        ctx.stroke();
+        var off = (r % 2) * (b.w / 4);
+        for (var sx = -hw + b.w / 4 + off; sx < hw - 4; sx += b.w / 4) {
+          ctx.beginPath();
+          ctx.moveTo(sx, ry - b.h / rows);
+          ctx.lineTo(sx, ry);
+          ctx.stroke();
+        }
+      }
+      // 石块斑点
+      ctx.fillStyle = 'rgba(90,100,115,0.3)';
+      for (var d = 0; d < 4; d++) {
+        var px2 = -hw + ((d * 37 + 13) % Math.max(1, b.w));
+        var py2 = -hh + ((d * 53 + 7) % Math.max(1, b.h));
+        ctx.beginPath();
+        ctx.arc(px2, py2, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // 顶部高光 + 底部暗边（立体感）
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fillRect(-hw, -hh, b.w, 3);
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fillRect(-hw, hh - 3, b.w, 3);
+    // 边框
+    ctx.strokeStyle = wood ? 'rgba(80,50,15,0.6)' : 'rgba(50,60,75,0.6)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-hw, -hh, b.w, b.h);
+
+    ctx.restore();
+  }
+
+  function drawParticles() {
+    particles.forEach(function (p) {
+      var a = Math.max(0, 1 - p.t / p.life);
+      // 外发光
+      ctx.globalAlpha = a * 0.35;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * a * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      // 核心
+      ctx.globalAlpha = a;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * a, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  function drawFloatTexts() {
+    floatTexts.forEach(function (f) {
+      var a = Math.max(0, 1 - f.t / 1.4);
+      ctx.globalAlpha = a;
+      ctx.font = 'bold 24px Arial';
+      ctx.textAlign = 'center';
+      var w = ctx.measureText(f.txt).width;
+      // 圆角背景标签
+      roundRect(f.x - w / 2 - 9, f.y - 21, w + 18, 28, 8);
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fill();
+      // 文字（加分金色，扣血橙红）
+      ctx.fillStyle = f.txt.indexOf('+') === 0 ? '#ffd700' : '#ff8a65';
+      ctx.fillText(f.txt, f.x, f.y);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  // ==================== 主循环 ====================
+  // ═══════════ v7：相机可见范围与边界夹紧 ═══════════
+  // 渲染变换为 ctx.translate(-cameraX, 0)，且缩放以视口中心为锚点，
+  // 因此屏幕可见的世界区间是：
+  //     [cameraX + (W - visW)/2 , cameraX + (W + visW)/2]，其中 visW = W / zoom
+  // 令 camShift = cameraX - (WORLD_W - visW)/2（相机相对世界中心的偏移），
+  // 则“世界始终盖住整个画面”等价于：
+  //     |camShift| ≤ (WORLD_W - visW) / 2
+  // 由于 zoom ∈ [0.5, 2]，visW ∈ [W/2, 2W] 且 WORLD_W = 2W，
+  // 该上界恒 ≥ W/2 > 0，任何缩放级别下相机都可动，且画面永不越出世界。
+  var camShift = 0;
+  function clampCamera() {
+    var visW = W / zoom;
+    var lim = (WORLD_W - visW) / 2;
+    if (!(lim >= 0)) lim = 0;                 // 防御：极值下退化为居中
+    if (!(camShift >= -lim)) camShift = -lim;
+    if (camShift > lim) camShift = lim;
+    cameraX = camShift + (WORLD_W - visW) / 2;
+    return cameraX;
+  }
+
+  // 【改动1】摄像机平滑跟随：ready 跟随弹弓（左端起点），flying 跟随飞行鸟，over 保持
+  // 【功能2】手动锁定：方向键/拖动平移视角后 2 秒内不自动跟随
+  // 【v7】平移（panning）期间完全接管相机；每帧出口统一 clampCamera，保证不越界
+  function updateCamera(dt) {
+    if (manualCameraTimer > 0) manualCameraTimer -= (dt || 0);
+
+    var flying = (gameState === 'flying' && currentBird && currentBird.awake && !currentBird.static);
+    // v7：正在拖动平移视角 → 相机完全由手势驱动
+    if (panning) { clampCamera(); return; }
+    if (!flying && manualCameraTimer > 0) {
+      // 手动视角模式：只做边界限制，不做自动跟随
+      clampCamera();
+      return;
+    }
+
+    var visW = W / zoom;
+    var target;
+    if (gameState === 'menu') {
+      target = -(WORLD_W - visW) / 2;         // 菜单：看世界左端
+    } else if (flying) {
+      target = currentBird.x - W * 0.5;      // 飞行鸟居中
+    } else if (gameState === 'ready') {
+      target = SLING_X - W * 0.35;           // 弹弓视角（左端）
+    } else {
+      clampCamera();                          // over：保持当前视角
+      return;
+    }
+    cameraX += (target - cameraX) * 0.1;
+    camShift = cameraX - (WORLD_W - visW) / 2;
+    clampCamera();
+  }
+
+  function update(dt) {
+    // 物理实时模拟：飞行中、回合间隙、结算后都持续运行——
+    // 塔不会冻结在半空，倒塌/滚动会在回合间自然进行完毕
+    if (gameState === 'flying' || gameState === 'ready' || gameState === 'over') {
+      stepPhysics(dt);
+    }
+    updateCamera(dt); // 【改动1】摄像机跟随（【功能2】支持手动锁定）
+
+    // 回合结算：当前鸟停下或消失
+    if (gameState === 'flying' && currentBird && currentBird.awake) {
+      if (currentBird.dead) {
+        settleCurrentBird();
+      } else if (Math.hypot(currentBird.vx, currentBird.vy) < 12) {
+        settleCurrentBird();
+      }
+    }
+
+    // 猪全灭 → 随时获胜（塌陷的结构砸死最后一只猪也立即过关）
+    if ((gameState === 'flying' || gameState === 'ready') && pigs.length > 0 &&
+        pigs.every(function (p) { return p.dead; })) {
+      endGame('win');
+      return;
+    }
+
+    // 无鸟可发射且结构完全静止 → 失败（等塔塌完再判定，避免冤枉）
+    if (gameState === 'ready' && !currentBird && remainingBirds.length === 0) {
+      var allStill = true;
+      for (var i = 0; i < bodies.length; i++) {
+        if (bodies[i].awake) { allStill = false; break; }
+      }
+      if (allStill) endGame('lose');
+    }
+  }
+
+  var lastFrame = 0;
+  function render(ts) {
+    var dt = Math.min((ts - lastFrame) / 1000, 0.033);
+    lastFrame = ts;
+    update(dt);
+    updateFx(dt);
+
+    // ==================== 【渲染修复】每帧完整清屏 ====================
+    // 必须在“未应用相机/缩放变换”的屏幕坐标系下清空整块后备缓冲。
+    // 原实现直接进入相机 transform 后绘制世界内容，缩放（zoom<1）或抖动时
+    // 覆盖不到的区域不被清除，旧帧逐帧残留 → 左侧出现“画中画”套娃残影。
+    // 注意：canvas.width/height 是后备缓冲像素，必须先重置为单位矩阵才能整屏清空。
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // 铺满不透明背景色：既彻底覆盖，也避免缩放后边缘露出透明条纹
+    ctx.fillStyle = '#87ceeb';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.save();
+    // 恢复基准变换后，后续所有绘制仍使用逻辑坐标（W×H）
+    ctx.setTransform(gameScale, 0, 0, gameScale, 0, 0);
+    if (shakeT > 0) {
+      var amp = shakeT * 14;
+      ctx.translate((Math.random() - 0.5) * amp, (Math.random() - 0.5) * amp);
+    }
+    // 【功能4】缩放：以视口中心为锚点（仅渲染层，不影响物理与 HTML 覆盖层）
+    if (zoom !== 1) {
+      ctx.translate(W / 2, H / 2);
+      ctx.scale(zoom, zoom);
+      ctx.translate(-W / 2, -H / 2);
+    }
+    ctx.translate(-cameraX, 0); // 【改动1】世界 → 视口（摄像机偏移）
+
+    // 【改动1】背景：离屏缓存优先（WORLD_W 全宽预渲染，防右侧空白 + 省性能）
+    if (bgCanvas) ctx.drawImage(bgCanvas, 0, 0);
+    else drawBackground();
+    drawSlingshot();
+    drawElastic();
+    drawTrajectory();
+
+    // 方块 → 猪 → 鸟（【改动1】按 cameraX 判断屏幕外，跳过绘制）
+    // 【功能4】缩放后可见世界范围随之变化，剔除边界按 zoom 换算
+    var half = W / 2;
+    var vL = cameraX + half * (1 - 1 / zoom) - 120;
+    var vR = cameraX + half * (1 + 1 / zoom) + 120;
+    blocks.forEach(function (b) {
+      if (b.x > vL && b.x < vR) drawBlock(b);
+    });
+    pigs.forEach(function (p) {
+      if (p.x > vL && p.x < vR) drawPig(p);
+    });
+    if (currentBird && currentBird.x > vL && currentBird.x < vR) drawBird(currentBird);
+    bodies.forEach(function (b) {
+      if (b.type === 'bird' && b !== currentBird && b.x > vL && b.x < vR) drawBird(b);
+    });
+
+    drawParticles();
+    drawFloatTexts();
+    ctx.restore();
+
+    requestAnimationFrame(render);
+  }
+
+  // ==================== 启动 ====================
+  buildBackground(); // 【改动1】预渲染世界背景缓存
+  showMenu();
+  requestAnimationFrame(render);
+
+  // 调试探针（便于自动化测试）
+  window.__ab = {
+    state: function () { return gameState; },
+    difficulty: function () { return difficulty; },
+    wallCount: function () { return bodies.filter(function (b) { return b.isWall; }).length; },
+    // 【改动4】新增：世界宽度 / 摄像机 / 关卡总数
+    worldW: function () { return WORLD_W; },
+    cameraX: function () { return cameraX; },
+    totalLevels: function () { return TOTAL_LEVELS; },
+    isUltra: function () { return isUltraLevel(); },
+    // 【功能2/4】摄像机手动锁定与缩放
+    manualTimer: function () { return manualCameraTimer; },
+    zoom: function () { return zoom; },
+    // 【v7】视角平移手势 / 尺寸自适应探针（自动化测试用，不影响玩法）
+    panning: function () { return panning; },
+    gestureMode: function () { return gestureMode; },
+    // 直接按屏幕像素拖动视角（等效于鼠标/手指拖动），便于无头测试
+    panBy: function (dxScreen, dyScreen) { panBy(dxScreen, dyScreen); manualCameraTimer = 1.6; return cameraX; },
+    camShift: function () { return camShift; },
+    // 直接设定相机偏移（测试用；等价于把视角拖到指定位置）    // 直接设定相机偏移（测试用；等价于把视角拖到指定位置）
+    setCamShift: function (s) { camShift = s; return clampCamera(); },
+    // 等比缩放（等效于 ↑↓），并重新夹紧相机
+    setZoom: function (z) {
+      zoom = Math.max(0.5, Math.min(2.0, Math.round((z || 1) * 10) / 10));
+      clampCamera();
+      return zoom;
+    },
+    clampCamera: function () { return clampCamera(); },
+    // 当前相机可见世界范围（用于断言不越界 / 无空白）
+    viewRange: function () {
+      var visW = W / zoom;
+      return { left: cameraX, right: cameraX + visW, visW: visW, world: WORLD_W };
+    },
+    layout: function () {
+      return {
+        cssW: canvas.style.width, cssH: canvas.style.height,
+        bufW: canvas.width, bufH: canvas.height,
+        gameScale: gameScale, dpr: dpr,
+        compact: compactHUD, isNarrow: isNarrow,        winW: lastLayout.w, winH: lastLayout.h,
+        rotateMask: rotateMaskVisible(), gameState: gameState
+      };
+    },
+    bird: function () { return currentBird ? { x: Math.round(currentBird.x), y: Math.round(currentBird.y), vx: Math.round(currentBird.vx), vy: Math.round(currentBird.vy), awake: currentBird.awake, s: currentBird.static, t: currentBird.birdType, powerUsed: !!currentBird.powerUsed } : null; },
+    bodyCount: function () { return bodies.length; },
+    pigDead: function () { return pigs.map(function (p) { return p.dead; }); },
+    dragging: function () { return dragging; },
+    sc: function () { return score; },
+    // 直接以指定速度发射当前弹弓上的鸟（测试用）
+    launch: function (vx, vy) {
+      if (currentBird && currentBird.static && gameState === 'ready') {
+        currentBird.static = false;
+        currentBird.awake = true;
+        currentBird.vx = vx;
+        currentBird.vy = vy;
+        gameState = 'flying';
+      }
+    },
+    // 直接加载指定关卡（测试用；支持无尽模式任意关卡号）
+    loadLevel: function (i) {
+      if (typeof i === 'number' && i >= 0) loadLevel(i);
+    },
+    // 回到菜单（测试用）
+    showMenu: function () { showMenu(); },
+    // 转储当前关卡结构（测试用）
+    dump: function () {
+      return {
+        birds: remainingBirds.slice(),
+        pigs: pigs.map(function (p) { return { x: p.x, y: p.y, r: p.r }; }),
+        blocks: blocks.map(function (b) { return { x: b.x, y: b.y, w: b.w, h: b.h, mat: b.mat, rot: b.rot }; })
+      };
+    },
+    // 实时读取所有物体的位置/状态（测试用）
+    live: function () {
+      return bodies.map(function (b) {
+        return { t: b.type, x: Math.round(b.x), y: Math.round(b.y), w: b.w, h: b.h, rot: b.rot, vrot: b.vrot, vy: Math.round(b.vy), awake: b.awake, hp: b.hp || 0, deco: b.deco || false };
+      });
+    },
+    // 对第 i 只猪造成伤害（测试用）
+    damage: function (i, dmg) {
+      if (pigs[i] && !pigs[i].dead) damagePig(pigs[i], dmg);
+    },
+    // 读取猪的血量（测试用）
+    pigHp: function () {
+      return pigs.map(function (p) { return { hp: p.hp, maxHp: p.maxHp, dead: p.dead }; });
+    },
+    // 在任意状态给第 i 块木板一个初速度（测试用：验证物理持续运行）
+    kickBlock: function (i, vx, vy) {
+      if (blocks[i]) {
+        blocks[i].awake = true;
+        blocks[i].vx = vx;
+        blocks[i].vy = vy;
+      }
+    }
+  };
+})();
+</script>
+</body>
+</html>
